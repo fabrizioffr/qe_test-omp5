@@ -16,11 +16,19 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
   USE ions_base,            ONLY : nat, ntyp => nsp, ityp
   USE constants,            ONLY : eps8
   USE klist,                ONLY : nks, xk, ngk, igk_k
+#if defined(__OPENMP_GPU)
+  USE omp_lib
+#endif
   USE lsda_mod,             ONLY : current_spin, lsda, isk
   USE wvfct,                ONLY : npwx, nbnd, wg, et
   USE control_flags,        ONLY : gamma_only
   USE uspp_param,           ONLY : upf, lmaxkb, nh, nhm
-  USE uspp,                 ONLY : nkb, vkb, deeq_d
+  USE uspp,                 ONLY : nkb, vkb
+#if defined(__OPENMP_GPU)
+  USE uspp,                 ONLY : deeq
+#else
+  USE uspp,                 ONLY : deeq_d
+#endif
   USE lsda_mod,             ONLY : nspin
   USE noncollin_module,     ONLY : noncolin, npol, lspinorb
   USE mp_pools,             ONLY : me_pool, root_pool
@@ -28,16 +36,21 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
   USE becmod,               ONLY : allocate_bec_type, deallocate_bec_type, &
                                    bec_type, becp, calbec
   USE mp,                   ONLY : mp_sum, mp_get_comm_null, &
-                                   mp_circular_shift_left 
-  USE wavefunctions_gpum,   ONLY : using_evc, using_evc_d, evc_d
-  USE wvfct_gpum,           ONLY : using_et
+                                   mp_circular_shift_left
+  USE wavefunctions_gpum,   ONLY : using_evc, using_evc_d
+  USE devxlib_buffers,      ONLY : dev_buf=>gpu_buffer
+#if defined(__OPENMP_GPU)
+  USE wavefunctions,        ONLY : evc
+  USE becmod,               ONLY : becp, bec_type
+#else
+  USE wavefunctions_gpum,   ONLY : evc_d
   USE becmod_gpum,          ONLY : becp_d, bec_type_d
+  USE device_memcpy_m,      ONLY : dev_memcpy
+#endif
+  USE wvfct_gpum,           ONLY : using_et
   USE becmod_subs_gpum,     ONLY : using_becp_auto, using_becp_d_auto, &
                                    calbec_gpu
   USE uspp_init,            ONLY : init_us_2, gen_us_dj_gpu, gen_us_dy_gpu
-#if defined(__CUDA)
-  USE device_fbuff_m,       ONLY : dev_buf
-#endif 
   !
   IMPLICIT NONE
   !
@@ -63,6 +76,8 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
 #if defined(__CUDA)
   attributes(DEVICE) :: gk_d, qm1_d, is_multinp_d, ix_d, shift_d, &
                         ityp_d, nh_d
+#endif
+#if defined(__CUDA) || defined(__OPENMP_GPU)
   !
   CALL using_evc_d(0)
   CALL using_evc(0)
@@ -73,20 +88,25 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
   npw = ngk(ik)
   IF ( nks > 1 ) CALL init_us_2( npw, igk_k(1,ik), xk(1,ik), vkb, .true. )
   !
-  CALL allocate_bec_type( nkb, nbnd, becp, intra_bgrp_comm ) 
+  CALL allocate_bec_type( nkb, nbnd, becp, intra_bgrp_comm )
   CALL using_becp_auto(2)
   !
   CALL using_evc_d(0)
   CALL using_becp_d_auto(2)
   !
+#if defined(__OPENMP_GPU)
+  CALL calbec_gpu( npw, vkb, evc, becp )
+#else
 !$acc data present(vkb(:,:))
 !$acc host_data use_device(vkb)
   CALL calbec_gpu( npw, vkb, evc_d, becp_d )
 !$acc end host_data
 !$acc end data
+#endif
   !
   CALL dev_buf%lock_buffer( qm1_d, npwx, ierr )
   !$cuf kernel do (1) <<<*,*>>>
+  !$omp target teams distribute parallel do
   DO iu = 1, npw
      q = SQRT( gk_d(iu,1)**2 + gk_d(iu,2)**2 + gk_d(iu,3)**2 )
      IF ( q > eps8 ) THEN
@@ -97,12 +117,21 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
   ENDDO
   !
   !----------define index arrays (type, atom, etc.) for cuf kernel loops------
+#if defined(__OPENMP_GPU)
+  !$omp target enter data map(to:ityp, nh)
+  !omp_device = omp_get_default_device()
+  !call omp_target_alloc_f(fptr_dev=is_multinp_d, dimensions=[nat*nhm], omp_dev=omp_device)
+  !call omp_target_alloc_f(fptr_dev=ix_d, dimensions=[nat*nhm,4], omp_dev=omp_device)
+  !$omp allocate allocator(omp_target_device_mem_alloc)
+  ALLOCATE( is_multinp_d(nat*nhm), ix_d(nat*nhm,4) )
+#else
   ALLOCATE( is_multinp_d(nat*nhm) )
   ALLOCATE( ix_d(nat*nhm,4), ityp_d(nat), nh_d(ntyp) )
   ityp_d = ityp  ;  nh_d = nh
+#endif
   !
   ALLOCATE( shift(nat) )
-  ijkb01 = 0 
+  ijkb01 = 0
   DO iu = 1, ntyp
     DO na1 = 1, nat
       IF (ityp(na1) == iu ) THEN
@@ -112,8 +141,12 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
     ENDDO
   ENDDO
   !
+#if defined(__OPENMP_GPU)
+  !$omp target enter data map(to:shift)
+#else
   ALLOCATE( shift_d(nat) )
   shift_d = shift
+#endif
   !
   ijkb01 = 0
   itot=0
@@ -127,13 +160,14 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
       IF ( .NOT. ismulti_np .AND. noncolin .AND. lspinorb ) &
                                    CALL errore('stres_us','wrong case',1)
       !$cuf kernel do (1) <<<*,*>>>
+      !$omp target teams distribute parallel do
       DO iu = itot+1, itot+nh_np1
-        ix_d(iu,1) = na1                !na 
+        ix_d(iu,1) = na1                !na
         ix_d(iu,2) = iu-itot            !ih
         ix_d(iu,3) = nh_np1             !nh(np)
         ix_d(iu,4) = ijkb01             !ishift
         is_multinp_d(iu) = ismulti_np
-      ENDDO 
+      ENDDO
       itot = itot + nh_np1
     ENDDO
   ENDDO
@@ -152,11 +186,18 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
   !
   CALL dev_buf%release_buffer( qm1_d, ierr )
   !
+#if defined(__OPENMP_GPU)
+  !$omp target exit data map(delete:ityp, nh, shift)
+  !call omp_target_free_f(fptr_dev=is_multinp_d, omp_dev=omp_device)
+  !call omp_target_free_f(fptr_dev=ix_d,         omp_dev=omp_device)
+  deallocate(is_multinp_d, ix_d)
+#else
   DEALLOCATE( is_multinp_d )
   DEALLOCATE( ix_d, ityp_d, nh_d, shift_d )
+#endif
   DEALLOCATE( shift )
   !
-  CALL deallocate_bec_type( becp ) 
+  CALL deallocate_bec_type( becp )
   CALL using_becp_auto(2)
   !
   RETURN
@@ -180,7 +221,9 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
        COMPLEX(DP) :: worksum, cv, wsum1, wsum2, wsum3, ps, evci
        !
        COMPLEX(DP), POINTER :: ps_d(:), deff_d(:,:,:), dvkb_d(:,:,:)
+#if !defined(__OPENMP_GPU)
        REAL(DP),    POINTER :: becpr_d(:,:)
+#endif
        !
        REAL(DP) :: xyz(3,3)
        INTEGER  :: ierrs(3)
@@ -207,7 +250,7 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
        !
        CALL dev_buf%lock_buffer( deff_d, (/ nhm,nhm,nat /), ierrs(1) )
        !
-       ! ... diagonal contribution - if the result from "calbec" are not 
+       ! ... diagonal contribution - if the result from "calbec" are not
        ! ... distributed, must be calculated on a single processor
        !
        ! ... for the moment when using_gpu is true becp is always fully present in all processors
@@ -217,18 +260,21 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
        CALL dev_buf%lock_buffer( ps_d, nkb, ierrs(2) )
        IF (ANY(ierrs(1:2) /= 0)) CALL errore( 'stres_us_gpu', 'cannot allocate buffers', ABS(MAXVAL(ierrs)) )
        !
-       becpr_d => becp_d%r_d 
+#if !defined(__OPENMP_GPU)
+       becpr_d => becp_d%r_d
+#endif
        !
        evps = 0._DP
        !
        compute_evps: IF ( .NOT. (nproc == 1 .AND. me_pool /= root_pool) ) THEN
          !
          DO ibnd_loc = 1, nbnd_loc
-            ibnd = ibnd_loc + becp%ibnd_begin - 1 
+            ibnd = ibnd_loc + becp%ibnd_begin - 1
             CALL compute_deff_gpu( deff_d, et(ibnd,ik) )
             wg_nk = wg(ibnd,ik)
             !
             !$cuf kernel do (1) <<<*,*>>>
+            !$omp target teams distribute parallel do
             DO i = 1, itot
               !
               ih = ix_d(i,2)       ; na = ix_d(i,1)
@@ -236,15 +282,26 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
               !
               IF (.NOT. is_multinp_d(i)) THEN
                  aux = wg_nk * DBLE(deff_d(ih,ih,na)) * &
+#if defined(__OPENMP_GPU)
+                                       ABS(becp%r(ikb,ibnd_loc))**2
+#else
                                        ABS(becpr_d(ikb,ibnd_loc))**2
+#endif
               ELSE
                  nh_np = ix_d(i,3)
                  !
                  aux = wg_nk * DBLE(deff_d(ih,ih,na))         &
+#if defined(__OPENMP_GPU)
+                                     * ABS(becp%r(ikb,ibnd_loc))**2  &
+                             +  becp%r(ikb,ibnd_loc)* wg_nk * 2._DP  &
+                                * SUM( DBLE(deff_d(ih,ih+1:nh_np,na)) &
+                                * becp%r(ishift+ih+1:ishift+nh_np,ibnd_loc))
+#else
                                      * ABS(becpr_d(ikb,ibnd_loc))**2  &
                              +  becpr_d(ikb,ibnd_loc)* wg_nk * 2._DP  &
                                 * SUM( DBLE(deff_d(ih,ih+1:nh_np,na)) &
                                 * becpr_d(ishift+ih+1:ishift+nh_np,ibnd_loc))
+#endif
               ENDIF
               evps = evps + aux
               !
@@ -261,7 +318,7 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
        IF (ierrs(3) /= 0) CALL errore( 'stres_us_gpu', 'cannot allocate buffers', ABS(ierrs(3)))
        !
        CALL gen_us_dj_gpu( ik, dvkb_d(:,:,4) )
-       IF ( lmaxkb > 0 ) THEN 
+       IF ( lmaxkb > 0 ) THEN
          DO ipol = 1, 3
            CALL gen_us_dy_gpu( ik, xyz(1,ipol), dvkb_d(:,:,ipol))
          ENDDO
@@ -271,22 +328,31 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
        DO icyc = 0, nproc -1
           !
           DO ibnd_loc = 1, nbnd_loc
-             !  
-             ibnd = ibnd_loc + becp%ibnd_begin - 1 
+             !
+             ibnd = ibnd_loc + becp%ibnd_begin - 1
              CALL compute_deff_gpu( deff_d, et(ibnd,ik) )
              !
              !$cuf kernel do (1) <<<*,*>>>
+             !$omp target teams distribute parallel do
              DO i = 1, itot
                !
                ih = ix_d(i,2)     ; na = ix_d(i,1)
                ishift = ix_d(i,4) ; ikb = ishift + ih
                !
                IF (.NOT. is_multinp_d(i)) THEN
+#if defined(__OPENMP_GPU)
+                  ps_d(ikb) =  deff_d(ih,ih,na) * CMPLX(becp%r(ikb,ibnd_loc))
+#else
                   ps_d(ikb) =  deff_d(ih,ih,na) * CMPLX(becpr_d(ikb,ibnd_loc))
+#endif
                ELSE
                   nh_np = ix_d(i,3)
                   !
+#if defined(__OPENMP_GPU)
+                  ps_d(ikb) = CMPLX( SUM( becp%r(ishift+1:ishift+nh_np,ibnd_loc) &
+#else
                   ps_d(ikb) = CMPLX( SUM( becpr_d(ishift+1:ishift+nh_np,ibnd_loc) &
+#endif
                                     * DBLE(deff_d(ih,1:nh_np,na))))
                ENDIF
                !
@@ -295,35 +361,52 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
              dot11 = 0._DP ; dot21 = 0._DP ; dot31 = 0._DP
              dot22 = 0._DP ; dot32 = 0._DP ; dot33 = 0._DP
              !
-             !$cuf kernel do(2) <<<*,*>>> 
-             DO na =1, nat 
+             !$cuf kernel do(2) <<<*,*>>>
+             !$omp target teams distribute parallel do collapse(2) &
+             !$omp &                            reduction(+:dot11) &
+             !$omp &                            reduction(+:dot21) &
+             !$omp &                            reduction(+:dot22) &
+             !$omp &                            reduction(+:dot31) &
+             !$omp &                            reduction(+:dot32) &
+             !$omp &                            reduction(+:dot33)
+             DO na =1, nat
                 DO i = 1, npw
-                   worksum = (0._DP,0._DP) 
-                   np = ityp_d(na) 
+                   worksum = (0._DP,0._DP)
+#if defined(__OPENMP_GPU)
+                   np = ityp(na)
+                   ijkb0 = shift(na)
+                   nh_np = nh(np)
+#else
+                   np = ityp_d(na)
                    ijkb0 = shift_d(na)
                    nh_np = nh_d(np)
+#endif
                    DO ih = 1, nh_np
-                      ikb = ijkb0 + ih  
-                      worksum = worksum + ps_d(ikb) * dvkb_d(i,ikb,4) 
+                      ikb = ijkb0 + ih
+                      worksum = worksum + ps_d(ikb) * dvkb_d(i,ikb,4)
                    ENDDO
-                   evci = evc_d(i,ibnd) 
-                   gk1  = gk_d(i,1) 
-                   gk2  = gk_d(i,2) 
-                   gk3  = gk_d(i,3) 
-                   qm1i = qm1_d(i) 
-                   !  
+#if defined(__OPENMP_GPU)
+                   evci = evc(i,ibnd)
+#else
+                   evci = evc_d(i,ibnd)
+#endif
+                   gk1  = gk_d(i,1)
+                   gk2  = gk_d(i,2)
+                   gk3  = gk_d(i,3)
+                   qm1i = qm1_d(i)
+                   !
                    cv = evci * CMPLX(gk1 * gk1  * qm1i)
-                   dot11 = dot11 + DBLE(worksum)*DBLE(cv) + DIMAG(worksum)*DIMAG(cv) 
-                   !  
+                   dot11 = dot11 + DBLE(worksum)*DBLE(cv) + DIMAG(worksum)*DIMAG(cv)
+                   !
                    cv = evci * CMPLX(gk2 * gk1 * qm1i )
                    dot21 = dot21 + DBLE(worksum)*DBLE(cv) + DIMAG(worksum)*DIMAG(cv)
-                   ! 
+                   !
                    cv = evci * CMPLX(gk3 * gk1 * qm1i)
                    dot31 = dot31 + DBLE(worksum)*DBLE(cv) + DIMAG(worksum)*DIMAG(cv)
-                   ! 
+                   !
                    cv = evci * CMPLX(gk2 * gk2 * qm1i)
                    dot22 = dot22 + DBLE(worksum)*DBLE(cv) + DIMAG(worksum)*DIMAG(cv)
-                   ! 
+                   !
                    cv = evci * CMPLX(gk3 * gk2 * qm1i)
                    dot32 = dot32 + DBLE(worksum)*DBLE(cv) + DIMAG(worksum)*DIMAG(cv)
                    !
@@ -332,47 +415,58 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
                 ENDDO
              ENDDO
              ! ... a factor 2 accounts for the other half of the G-vector sphere
-             sigmanlc(:,1) = sigmanlc(:,1) - 4._DP * wg(ibnd,ik) * [dot11, dot21, dot31] 
+             sigmanlc(:,1) = sigmanlc(:,1) - 4._DP * wg(ibnd,ik) * [dot11, dot21, dot31]
              sigmanlc(:,2) = sigmanlc(:,2) - 4._DP * wg(ibnd,ik) * [0._DP, dot22, dot32]
-             sigmanlc(:,3) = sigmanlc(:,3) - 4._DP * wg(ibnd,ik) * [0._DP, 0._DP, dot33]                  
+             sigmanlc(:,3) = sigmanlc(:,3) - 4._DP * wg(ibnd,ik) * [0._DP, 0._DP, dot33]
 
              !
              ! ... non diagonal contribution - derivative of the spherical harmonics
              ! ... (no contribution from l=0)
              !
-             IF ( lmaxkb == 0 ) CYCLE 
+             IF ( lmaxkb == 0 ) CYCLE
              !
              !------------------------------------
              !
              dot11 = 0._DP ; dot21 = 0._DP ; dot31 = 0._DP
              dot22 = 0._DP ; dot32 = 0._DP ; dot33 = 0._DP
              !
-             !$cuf kernel do(2) <<<*,*>>> 
-             DO ikb = 1, nkb 
-                DO i = 1, npw  
+             !$cuf kernel do(2) <<<*,*>>>
+             !$omp target teams distribute parallel do collapse(2) &
+             !$omp &                            reduction(+:dot11) &
+             !$omp &                            reduction(+:dot21) &
+             !$omp &                            reduction(+:dot22) &
+             !$omp &                            reduction(+:dot31) &
+             !$omp &                            reduction(+:dot32) &
+             !$omp &                            reduction(+:dot33)
+             DO ikb = 1, nkb
+                DO i = 1, npw
                    !
-                   wsum1 = ps_d(ikb)*dvkb_d(i,ikb,1) 
-                   wsum2 = ps_d(ikb)*dvkb_d(i,ikb,2) 
-                   wsum3 = ps_d(ikb)*dvkb_d(i,ikb,3)      
+                   wsum1 = ps_d(ikb)*dvkb_d(i,ikb,1)
+                   wsum2 = ps_d(ikb)*dvkb_d(i,ikb,2)
+                   wsum3 = ps_d(ikb)*dvkb_d(i,ikb,3)
                    !
-                   evci = evc_d(i,ibnd) 
+#if defined(__OPENMP_GPU)
+                   evci = evc(i,ibnd)
+#else
+                   evci = evc_d(i,ibnd)
+#endif
                    gk1 = gk_d(i,1)
                    gk2 = gk_d(i,2)
-                   gk3 = gk_d(i,3) 
-                   !
+                   gk3 = gk_d(i,3)
+!                   !
                    cv = evci * CMPLX(gk1 )
                    dot11 = dot11 + DBLE( wsum1)* DBLE(cv) + DIMAG(wsum1)*DIMAG(cv)
                    dot21 = dot21 + DBLE( wsum2)* DBLE(cv) + DIMAG(wsum2)*DIMAG(cv)
                    dot31 = dot31 + DBLE( wsum3)* DBLE(cv) + DIMAG(wsum3)*DIMAG(cv)
                    !
                    cv = evci * CMPLX( gk2)
-                   dot22 = dot22 + DBLE( wsum2)* DBLE(cv) + DIMAG(wsum2)*DIMAG(cv) 
+                   dot22 = dot22 + DBLE( wsum2)* DBLE(cv) + DIMAG(wsum2)*DIMAG(cv)
                    dot32 = dot32 + DBLE( wsum3)* DBLE(cv) + DIMAG(wsum3)*DIMAG(cv)
-                   ! 
+                   !
                    cv =  evci * CMPLX( gk3 )
                    dot33 = dot33 + DBLE( wsum3)* DBLE(cv) + DIMAG(wsum3)*DIMAG(cv)
                 ENDDO
-             ENDDO 
+             ENDDO
              !
              ! ... a factor 2 accounts for the other half of the G-vector sphere
              !
@@ -381,7 +475,7 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
              sigmanlc(:,3) = sigmanlc(:,3) -4._DP * wg(ibnd, ik) * [0._DP, 0._DP, dot33]
              IF ( nproc > 1 ) THEN
                  CALL errore ('stres_us_gamma_gpu line 303', &
-                       'unexpected error nproc be 1 with GPU acceleration', 100) 
+                       'unexpected error nproc be 1 with GPU acceleration', 100)
                 !CALL mp_circular_shift_left(becp%r, icyc, becp%comm)
                 !CALL mp_circular_shift_left(becp%ibnd_begin, icyc, becp%comm)
                 !CALL mp_circular_shift_left(nbnd_loc, icyc, becp%comm)
@@ -408,9 +502,12 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
      !
      !----------------------------------------------------------------------
      SUBROUTINE stres_us_k_gpu()
-       !----------------------------------------------------------------------  
-       !! nonlocal contribution to the stress - k-points version       
+       !----------------------------------------------------------------------
+       !! nonlocal contribution to the stress - k-points version
        !
+#if defined(__OPENMP) && defined(__PGI)
+       USE omp_lib
+#endif
        IMPLICIT NONE
        !
        ! ... local variables
@@ -426,7 +523,9 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
        COMPLEX(DP), POINTER :: dvkb_d(:,:,:)
        COMPLEX(DP), POINTER :: deff_d(:,:,:), deff_nc_d(:,:,:,:)
        COMPLEX(DP), POINTER :: ps_d(:), ps_nc_d(:,:)
+#if !defined(__OPENMP_GPU)
        COMPLEX(DP), POINTER :: becpk_d(:,:), becpnc_d(:,:,:)
+#endif
        INTEGER :: nhmx, ierrs(3)
        !
        REAL(DP) :: xyz(3,3)
@@ -434,7 +533,7 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
        DATA xyz / 1._DP, 0._DP, 0._DP, 0._DP, 1._DP, 0._DP, 0._DP, &
                   0._DP, 1._DP /
        !
-#if defined(__CUDA) 
+#if defined(__CUDA)
        ATTRIBUTES(DEVICE) :: ps_d, ps_nc_d, becpnc_d, becpk_d, dvkb_d, &
                              deff_d, deff_nc_d
 #endif
@@ -447,7 +546,7 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
        CALL dev_buf%lock_buffer( dvkb_d, (/ npwx,nkb,4 /), ierrs(1) )
        !
        CALL gen_us_dj_gpu( ik, dvkb_d(:,:,4) )
-       IF ( lmaxkb > 0 ) THEN 
+       IF ( lmaxkb > 0 ) THEN
          DO ipol = 1, 3
            CALL gen_us_dy_gpu( ik, xyz(1,ipol), dvkb_d(:,:,ipol) )
          ENDDO
@@ -456,11 +555,15 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
        IF (noncolin) THEN
           CALL dev_buf%lock_buffer( ps_nc_d, (/ nkb,npol /), ierrs(2) )
           CALL dev_buf%lock_buffer( deff_nc_d, (/ nhm,nhm,nat,nspin /), ierrs(3) )
+#if !defined(__OPENMP_GPU)
           becpnc_d => becp_d%nc_d
-       ELSE 
+#endif
+       ELSE
           CALL dev_buf%lock_buffer ( ps_d, nkb, ierrs(2) )
           CALL dev_buf%lock_buffer( deff_d, (/ nhm,nhm,nat /), ierrs(3) )
+#if !defined(__OPENMP_GPU)
           becpk_d => becp_d%k_d
+#endif
        ENDIF
        IF (ANY(ierrs /= 0)) CALL errore( 'stres_us_gpu', 'cannot allocate buffers', ABS(MAXVAL(ierrs)) )
        !
@@ -485,6 +588,7 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
           IF (noncolin) THEN
             !
             !$cuf kernel do (1) <<<*,*>>>
+            !$omp target teams distribute parallel do reduction(+:evps)
             DO i = 1, itot
               !
               ih = ix_d(i,2)     ; na = ix_d(i,1)
@@ -498,8 +602,13 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
                    DO js = 1, npol
                       ijs = ijs + 1
                       aux = aux + fac * DBLE(deff_nc_d(ih,ih,na,ijs) &
+#if defined(__OPENMP_GPU)
+                                         * CONJG(becp%nc(ikb,is,ibnd)) *   &
+                                                 becp%nc(ikb,js,ibnd))
+#else
                                          * CONJG(becpnc_d(ikb,is,ibnd)) *   &
                                                  becpnc_d(ikb,js,ibnd))
+#endif
                    ENDDO
                  ENDDO
                  !
@@ -512,8 +621,13 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
                    DO js = 1, npol
                       ijs = ijs + 1
                       aux = aux + fac * DBLE(deff_nc_d(ih,ih,na,ijs) &
+#if defined(__OPENMP_GPU)
+                                         * CONJG(becp%nc(ikb,is,ibnd))*    &
+                                                 becp%nc(ikb,js,ibnd))
+#else
                                          * CONJG(becpnc_d(ikb,is,ibnd))*    &
                                                  becpnc_d(ikb,js,ibnd))
+#endif
                    ENDDO
                  ENDDO
                  !
@@ -525,8 +639,13 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
                          ijs = ijs + 1
                          aux = aux + 2._DP*fac * &
                                        DBLE( deff_nc_d(ih,jh,na,ijs) * &
+#if defined(__OPENMP_GPU)
+                                       (CONJG(becp%nc(ikb,is,ibnd))  * &
+                                              becp%nc(ikb,js,ibnd)) )
+#else
                                        (CONJG(becpnc_d(ikb,is,ibnd)) *   &
                                               becpnc_d(jkb,js,ibnd)) )
+#endif
                       ENDDO
                     ENDDO
                  ENDDO
@@ -539,6 +658,7 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
             !
             aux = 0.d0
             !$cuf kernel do (1) <<<*,*>>>
+            !$omp target teams distribute parallel do reduction(+:evps)
             DO i = 1, itot
               !
               ih = ix_d(i,2)     ; na = ix_d(i,1)
@@ -547,17 +667,28 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
               IF (.NOT. is_multinp_d(i)) THEN
                  !
                  aux = fac * deff_d(ih,ih,na) * &
+#if defined(__OPENMP_GPU)
+                               ABS(becp%k(ikb,ibnd) )**2
+#else
                                ABS(becpk_d(ikb,ibnd) )**2
+#endif
                  !
               ELSE
                  !
                  nh_np = ix_d(i,3)
                  !
                  aux = fac * DBLE(deff_d(ih,ih,na) * &
+#if defined(__OPENMP_GPU)
+                                ABS(becp%k(ikb,ibnd) )**2) + &
+                                DBLE(SUM( deff_d(ih,ih+1:nh_np,na) * &
+                                fac * 2._DP*DBLE( CONJG(becp%k(ikb,ibnd)) &
+                                * becp%k(ishift+ih+1:ishift+nh_np,ibnd) ) ))
+#else
                                 ABS(becpk_d(ikb,ibnd) )**2) + &
                                 DBLE(SUM( deff_d(ih,ih+1:nh_np,na) * &
                                 fac * 2._DP*DBLE( CONJG(becpk_d(ikb,ibnd)) &
                                 * becpk_d(ishift+ih+1:ishift+nh_np,ibnd) ) ))
+#endif
                  !
               ENDIF
               evps = evps + aux
@@ -582,6 +713,7 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
             CALL compute_deff_nc_gpu( deff_nc_d, et(ibnd,ik) )
             !
             !$cuf kernel do (1) <<<*,*>>>
+            !$omp target teams distribute parallel do
             DO i = 1, itot
               !
               ih = ix_d(i,2)     ; na = ix_d(i,1)
@@ -591,7 +723,11 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
                  !
                  DO is = 1, npol
                    ijs = (is-1)*npol
+#if defined(__OPENMP_GPU)
+                   ps_nc_d(ikb,is) = SUM( becp%nc(ikb,1:npol,ibnd) * &
+#else
                    ps_nc_d(ikb,is) = SUM( becpnc_d(ikb,1:npol,ibnd) * &
+#endif
                                           deff_nc_d(ih,ih,na,ijs+1:ijs+npol) )
                  ENDDO
                  !
@@ -601,9 +737,13 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
                  !
                  DO is = 1, npol
                    ijs = (is-1)*npol
+#if defined(__OPENMP_GPU)
+                   ps_nc_d(ikb,is) = SUM( becp%nc(ishift+1:ishift+nh_np,1:npol,ibnd) * &
+#else
                    ps_nc_d(ikb,is) = SUM( becpnc_d(ishift+1:ishift+nh_np,1:npol,ibnd) * &
+#endif
                                           deff_nc_d(ih,1:nh_np,na,ijs+1:ijs+npol) )
-                 ENDDO  
+                 ENDDO
                  !
               ENDIF
             ENDDO
@@ -613,18 +753,28 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
             CALL compute_deff_gpu( deff_d, et(ibnd,ik) )
             !
             !$cuf kernel do (1) <<<*,*>>>
+            !$omp target teams distribute parallel do
             DO i = 1, itot
                !
                ih = ix_d(i,2)     ; na = ix_d(i,1)
                ishift = ix_d(i,4) ; ikb = ishift + ih
                !
                IF (.NOT. is_multinp_d(i)) THEN
+#if defined(__OPENMP_GPU)
+                  ps_d(ikb) = CMPLX(deeq(ih,ih,na,current_spin)) * &
+                                    becp%k(ikb,ibnd)
+#else
                   ps_d(ikb) = CMPLX(deeq_d(ih,ih,na,current_spin)) * &
                                     becpk_d(ikb,ibnd)
-               ELSE 
+#endif
+               ELSE
                   nh_np = ix_d(i,3)
                   !
+#if defined(__OPENMP_GPU)
+                  ps_d(ikb) = SUM( becp%k(ishift+1:ishift+nh_np,ibnd) * &
+#else
                   ps_d(ikb) = SUM( becpk_d(ishift+1:ishift+nh_np,ibnd) * &
+#endif
                                                  deff_d(ih,1:nh_np,na) )
                ENDIF
                !
@@ -637,53 +787,65 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
          !
          !
          IF (noncolin) THEN
-            !$cuf kernel do(2) <<<*,*>>>    
+            !$cuf kernel do(2) <<<*,*>>>
+            !$omp target teams distribute parallel do collapse(2) &
+            !$omp &                            reduction(+:dot11) &
+            !$omp &                            reduction(+:dot21) &
+            !$omp &                            reduction(+:dot22) &
+            !$omp &                            reduction(+:dot31) &
+            !$omp &                            reduction(+:dot32) &
+            !$omp &                            reduction(+:dot33)
             DO ikb =1, nkb
-               DO i = 1, npw    
+               DO i = 1, npw
+#if defined(__OPENMP_GPU)
+                  evc1i = evc(i, ibnd)
+                  evc2i = evc(i+npwx,ibnd)
+#else
                   evc1i = evc_d(i, ibnd)
                   evc2i = evc_d(i+npwx,ibnd)
+#endif
                   qm1i = CMPLX(qm1_d(i))
                   gk1 = CMPLX(gk_d(i,1))
                   gk2 = CMPLX(gk_d(i,2))
                   gk3 = CMPLX(gk_d(i,3))
-                  worksum1 = ps_nc_d(ikb,1) * dvkb_d(i,ikb,4)     
-                  worksum2 = ps_nc_d(ikb,2) * dvkb_d(i,ikb,4)   
-                  !   
+                  worksum1 = ps_nc_d(ikb,1) * dvkb_d(i,ikb,4)
+                  worksum2 = ps_nc_d(ikb,2) * dvkb_d(i,ikb,4)
+                  !
                   cv1 = evc1i * gk1 * gk1 * qm1i
                   cv2 = evc2i * gk1 * gk1 * qm1i
                   dot11 = dot11 + DBLE(worksum1)*DBLE(cv1)   + &
                                   DIMAG(worksum1)*DIMAG(cv1) + &
                                   DBLE(worksum2)*DBLE(cv2)   + &
                                   DIMAG(worksum2)*DIMAG(cv2)
-                  !   
+                  !
                   cv1 = evc1i * gk2 * gk1 * qm1i
                   cv2 = evc2i * gk2 * gk1 * qm1i
                   dot21 = dot21 + DBLE(worksum1)*DBLE(cv1)   + &
                                   DIMAG(worksum1)*DIMAG(cv1) + &
                                   DBLE(worksum2)*DBLE(cv2)   + &
-                                  DIMAG(worksum2)*DIMAG(cv2)   
-                  !   
+                                  DIMAG(worksum2)*DIMAG(cv2)
+                  !
                   cv1 = evc1i * gk3 * gk1 * qm1i
                   cv2 = evc2i * gk3 * gk1 * qm1i
                   dot31 = dot31 + DBLE(worksum1)*DBLE(cv1)   + &
                                   DIMAG(worksum1)*DIMAG(cv1) + &
                                   DBLE(worksum2)*DBLE(cv2)   + &
-                                  DIMAG(worksum2)*DIMAG(cv2)   
-                  !   
+                                  DIMAG(worksum2)*DIMAG(cv2)
+                  !
                   cv1 = evc1i * gk2 * gk2 * qm1i
                   cv2 = evc2i * gk2 * gk2 * qm1i
                   dot22 = dot22 + DBLE(worksum1)*DBLE(cv1)   + &
                                   DIMAG(worksum1)*DIMAG(cv1) + &
                                   DBLE(worksum2)*DBLE(cv2)   + &
-                                  DIMAG(worksum2)*DIMAG(cv2)   
-                  !   
+                                  DIMAG(worksum2)*DIMAG(cv2)
+                  !
                   cv1 = evc1i * gk3 * gk2 * qm1i
                   cv2 = evc2i * gk3 * gk2 * qm1i
                   dot32 = dot32 + DBLE(worksum1)*DBLE(cv1)   + &
                                   DIMAG(worksum1)*DIMAG(cv1) + &
                                   DBLE(worksum2)*DBLE(cv2)   + &
                                   DIMAG(worksum2)*DIMAG(cv2)
-                  !   
+                  !
                   cv1  = evc1i * gk3 * gk3 * qm1i
                   cv2  = evc2i * gk3 * gk3 * qm1i
                   dot33 = dot33 + DBLE(worksum1)*DBLE(cv1)   + &
@@ -693,16 +855,27 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
                ENDDO
             ENDDO
             !
-         ELSE   
+         ELSE
             !
             !
-            !$cuf kernel do(2) <<<*,*>>>   
+            !$cuf kernel do(2) <<<*,*>>>
+            !$omp target teams distribute parallel do collapse(2) &
+            !$omp &                            reduction(+:dot11) &
+            !$omp &                            reduction(+:dot21) &
+            !$omp &                            reduction(+:dot22) &
+            !$omp &                            reduction(+:dot31) &
+            !$omp &                            reduction(+:dot32) &
+            !$omp &                            reduction(+:dot33)
             DO ikb = 1, nkb
                DO i = 1, npw
                   !
-                  worksum = ps_d(ikb) *dvkb_d(i,ikb,4)   
-                  !    
+                  worksum = ps_d(ikb) *dvkb_d(i,ikb,4)
+                  !
+#if defined(__OPENMP_GPU)
+                  evci = evc(i,ibnd)
+#else
                   evci = evc_d(i,ibnd)
+#endif
                   qm1i = CMPLX(qm1_d(i))
                   gk1 = CMPLX(gk_d(i,1))
                   gk2 = CMPLX(gk_d(i,2))
@@ -725,33 +898,40 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
                   !
                   cv = evci * gk3 * gk3 * qm1i
                   dot33 = dot33 + DBLE(worksum)*DBLE(cv) + DIMAG(worksum)*DIMAG(cv)
-                  !   
-               ENDDO   
-            ENDDO   
-            !   
-            !IF ( me_bgrp /= root_bgrp ) stop     
-            !   
+                  !
+               ENDDO
+            ENDDO
+            !
+            !IF ( me_bgrp /= root_bgrp ) stop
+            !
          ENDIF
          !
          sigmanlc(:,1) = sigmanlc(:,1) - 2._DP * wg(ibnd,ik) * [dot11, dot21, dot31]
          sigmanlc(:,2) = sigmanlc(:,2) - 2._DP * wg(ibnd,ik) * [0._DP, dot22, dot32]
          sigmanlc(:,3) = sigmanlc(:,3) - 2._DP * wg(ibnd,ik) * [0._DP, 0._DP, dot33]
-         !      
+         !
          ! ... non diagonal contribution - derivative of the spherical harmonics
          ! ... (no contribution from l=0)
-         !      
-         IF ( lmaxkb == 0 ) CYCLE       
-         !      
-         dot11 = 0._DP ;  dot21 = 0._DP      
-         dot31 = 0._DP ;  dot22 = 0._DP      
-         dot32 = 0._DP ;  dot33 = 0._DP      
          !
-         IF (noncolin) THEN      
-            !      
-            !$cuf kernel do(2) <<<*,*>>>      
+         IF ( lmaxkb == 0 ) CYCLE
+         !
+         dot11 = 0._DP ;  dot21 = 0._DP
+         dot31 = 0._DP ;  dot22 = 0._DP
+         dot32 = 0._DP ;  dot33 = 0._DP
+         !
+         IF (noncolin) THEN
+            !
+            !$cuf kernel do(2) <<<*,*>>>
+            !$omp target teams distribute parallel do collapse(2) &
+            !$omp &                            reduction(+:dot11) &
+            !$omp &                            reduction(+:dot21) &
+            !$omp &                            reduction(+:dot22) &
+            !$omp &                            reduction(+:dot31) &
+            !$omp &                            reduction(+:dot32) &
+            !$omp &                            reduction(+:dot33)
             DO ikb =1, nkb
                DO i = 1, npw
-                  !       
+                  !
                   gk1 = CMPLX(gk_d(i,1))
                   gk2 = CMPLX(gk_d(i,2))
                   gk3 = CMPLX(gk_d(i,3))
@@ -760,16 +940,21 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
                   ps2 = ps_nc_d(ikb,2)
                   !
                   ps1d1 = ps1 * dvkb_d(i,ikb,1)
-                  ps1d2 = ps1 * dvkb_d(i,ikb,2)       
-                  ps1d3 = ps1 * dvkb_d(i,ikb,3)       
+                  ps1d2 = ps1 * dvkb_d(i,ikb,2)
+                  ps1d3 = ps1 * dvkb_d(i,ikb,3)
                   !
                   ps2d1 = ps2 * dvkb_d(i,ikb,1)
                   ps2d2 = ps2 * dvkb_d(i,ikb,2)
                   ps2d3 = ps2 * dvkb_d(i,ikb,3)
                   !
-                  evc1i = evc_d(i,ibnd)       
-                  evc2i = evc_d(i+npwx,ibnd)       
-                  !      
+#if defined(__OPENMP_GPU)
+                  evc1i = evc(i,ibnd)
+                  evc2i = evc(i+npwx,ibnd)
+#else
+                  evc1i = evc_d(i,ibnd)
+                  evc2i = evc_d(i+npwx,ibnd)
+#endif
+                  !
                   cv1 = evc1i * gk1
                   cv2 = evc2i * gk1
                   dot11 = dot11 + DBLE(ps1d1)*DBLE(cv1)   + &
@@ -785,7 +970,7 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
                   dot31 = dot31 + DBLE(ps1d3)*DBLE(cv1)   + &
                                   DIMAG(ps1d3)*DIMAG(cv1) + &
                                   DBLE(ps2d3)*DBLE(cv2)   + &
-                                  DIMAG(ps2d3)*DIMAG(cv2)       
+                                  DIMAG(ps2d3)*DIMAG(cv2)
                   !
                   cv1 = evc1i * gk2
                   cv2 = evc2i * gk2
@@ -804,7 +989,7 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
                   dot33 = dot33 + DBLE(ps1d3)*DBLE(cv1)   + &
                                   DIMAG(ps1d3)*DIMAG(cv1) + &
                                   DBLE(ps2d3)*DBLE(cv2)   + &
-                                  DIMAG(ps2d3)*DIMAG(cv2)      
+                                  DIMAG(ps2d3)*DIMAG(cv2)
                   !
                ENDDO
             ENDDO
@@ -812,13 +997,24 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
          ELSE
             !
             !$cuf kernel do(2) <<<*,*>>>
+            !$omp target teams distribute parallel do collapse(2) &
+            !$omp &                            reduction(+:dot11) &
+            !$omp &                            reduction(+:dot21) &
+            !$omp &                            reduction(+:dot22) &
+            !$omp &                            reduction(+:dot31) &
+            !$omp &                            reduction(+:dot32) &
+            !$omp &                            reduction(+:dot33)
             DO ikb = 1, nkb
                DO i = 1, npw
                  ps   = ps_d(ikb)
                  psd1 = ps*dvkb_d(i,ikb,1)
-                 psd2 = ps*dvkb_d(i,ikb,2)       
+                 psd2 = ps*dvkb_d(i,ikb,2)
                  psd3 = ps*dvkb_d(i,ikb,3)
+#if defined(__OPENMP_GPU)
+                 evci = evc(i,ibnd)
+#else
                  evci = evc_d(i,ibnd)
+#endif
                  gk1  = CMPLX(gk_d(i,1))
                  gk2  = CMPLX(gk_d(i,2))
                  gk3  = CMPLX(gk_d(i,3))
@@ -836,23 +1032,23 @@ SUBROUTINE stres_us_gpu( ik, gk_d, sigmanlc )
                  dot33 = dot33 + DBLE(psd3)*DBLE(cv) + DIMAG(psd3)*DIMAG(cv)
                ENDDO
             ENDDO
-            !   
-         ENDIF      
-         !       
+            !
+         ENDIF
+         !
          sigmanlc(:,1) = sigmanlc(:,1) -2._DP * wg(ibnd,ik) * [dot11, dot21, dot31]
          sigmanlc(:,2) = sigmanlc(:,2) -2._DP * wg(ibnd,ik) * [0._DP, dot22, dot32]
          sigmanlc(:,3) = sigmanlc(:,3) -2._DP * wg(ibnd,ik) * [0._DP, 0._DP, dot33]
          !
-       ENDDO 
+       ENDDO
        !
 10     CONTINUE
        !
        CALL dev_buf%release_buffer( dvkb_d, ierrs(1) )
        !
-       IF (noncolin) THEN 
+       IF (noncolin) THEN
           CALL dev_buf%release_buffer( ps_nc_d, ierrs(2) )
           CALL dev_buf%release_buffer( deff_nc_d, ierrs(3) )
-       ELSE 
+       ELSE
           CALL dev_buf%release_buffer( ps_d, ierrs(2) )
           CALL dev_buf%release_buffer( deff_d, ierrs(3) )
        ENDIF

@@ -95,9 +95,16 @@ SUBROUTINE h_psi__gpu( lda, n, m, psi_d, hpsi_d )
   USE kinds,                   ONLY : DP
   USE bp,                      ONLY : lelfield, l3dstring, gdir, efield, efield_cry
   USE becmod,                  ONLY : bec_type, becp, calbec
+#if !defined(__OPENMP_GPU)
   USE becmod_gpum,             ONLY : becp_d
+#endif
   USE lsda_mod,                ONLY : current_spin
+#if defined(__OPENMP_GPU)
+  USE scf_gpum,                ONLY: using_vrs_d
+  USE scf,                     ONLY: vrs
+#else
   USE scf_gpum,                ONLY : vrs_d, using_vrs_d
+#endif
   USE uspp,                    ONLY : nkb, vkb
   USE ldaU,                    ONLY : lda_plus_u, lda_plus_u_kind, U_projection
   USE gvect,                   ONLY : gstart
@@ -111,17 +118,23 @@ SUBROUTINE h_psi__gpu( lda, n, m, psi_d, hpsi_d )
   USE exx,                     ONLY : use_ace, vexx, vexxace_gamma, vexxace_k
   USE xc_lib,                  ONLY : exx_is_active, xclib_dft_is
   USE fft_helper_subroutines
+#if !defined(__OPENMP_GPU)
   USE devxlib_memcpy,          ONLY : dev_memcpy_h2d => devxlib_memcpy_h2d, &
                                       dev_memcpy_d2h => devxlib_memcpy_d2h
   USE devxlib_memset,          ONLY : dev_memset => devxlib_memory_set
   !
   USE wvfct_gpum,              ONLY : g2kin_d, using_g2kin_d
+#else
+  USE wvfct,                   ONLY : g2kin
+  USE wvfct_gpum,              ONLY : using_g2kin_d
+#endif
   USE becmod_subs_gpum,        ONLY : calbec_gpu, using_becp_auto, using_becp_d_auto
   IMPLICIT NONE
   !
   INTEGER, INTENT(IN)     :: lda, n, m
   COMPLEX(DP), INTENT(IN)  :: psi_d(lda*npol,m)
   COMPLEX(DP), INTENT(OUT) :: hpsi_d(lda*npol,m)
+#if !defined(__OPENMP_GPU)
 #if defined(__CUDA)
   attributes(DEVICE) :: psi_d, hpsi_d
 #endif
@@ -130,6 +143,7 @@ SUBROUTINE h_psi__gpu( lda, n, m, psi_d, hpsi_d )
   COMPLEX(DP), ALLOCATABLE :: hpsi_host(:,:)
 #if defined(__CUDA)
   attributes(PINNED) :: psi_host, hpsi_host
+#endif
 #endif
   !
   INTEGER     :: ipol, ibnd, incr, i
@@ -148,12 +162,20 @@ SUBROUTINE h_psi__gpu( lda, n, m, psi_d, hpsi_d )
                     (lda_plus_u .AND. U_projection.NE."pseudo" ) .OR. &
                     exx_is_active() .OR. lelfield
 
+#if !defined(__OPENMP_GPU)
   IF (need_host_copy) THEN
       ALLOCATE(psi_host(lda*npol,m) , hpsi_host(lda*npol,m) )
       CALL dev_memcpy_d2h(psi_host, psi_d)    ! psi_host = psi_d
   ENDIF
+#else
+  ASSOCIATE(g2kin_d=>g2kin, vrs_d=>vrs, becp_d=>becp)
+  IF (need_host_copy) THEN
+      !$omp target update from(psi_d)
+  ENDIF
+#endif
 
   !$cuf kernel do(2)
+  !$omp target teams distribute parallel do collapse(2)
   DO ibnd = 1, m
      DO i=1, lda
         IF (i <= n) THEN
@@ -170,7 +192,13 @@ SUBROUTINE h_psi__gpu( lda, n, m, psi_d, hpsi_d )
      END DO
   END DO
 
-  IF (need_host_copy) CALL dev_memcpy_d2h(hpsi_host, hpsi_d)    ! hpsi_host = hpsi_d
+  IF (need_host_copy) THEN
+#if !defined(__OPENMP_GPU)
+     CALL dev_memcpy_d2h(hpsi_host, hpsi_d)    ! hpsi_host = hpsi_d
+#else
+     !$omp target update from(hpsi_d)
+#endif
+  ENDIF
 
   CALL start_clock_gpu( 'h_psi:pot' ); !write (*,*) 'start h_pot';FLUSH(6)
   !
@@ -189,7 +217,11 @@ SUBROUTINE h_psi__gpu( lda, n, m, psi_d, hpsi_d )
         CALL using_becp_auto(1)
         DO ibnd = 1, m, 2
            ! ... transform psi to real space -> psic
+#if !defined(__OPENMP_GPU)
            CALL invfft_orbital_gamma(psi_host, ibnd, m )
+#else
+           CALL invfft_orbital_gamma(psi_d, ibnd, m )
+#endif
            ! ... compute becp%r = < beta|psi> from psic in real space
      CALL start_clock_gpu( 'h_psi:calbec' )
            CALL calbec_rs_gamma( ibnd, m, becp%r )
@@ -199,9 +231,17 @@ SUBROUTINE h_psi__gpu( lda, n, m, psi_d, hpsi_d )
            ! ... psic (hpsi) -> psic + vusp
            CALL  add_vuspsir_gamma( ibnd, m )
            ! ... transform psic back in reciprocal space and add it to hpsi
+#if !defined(__OPENMP_GPU)
            CALL fwfft_orbital_gamma( hpsi_host, ibnd, m, add_to_orbital=.TRUE. )
+#else
+           CALL fwfft_orbital_gamma( hpsi_d, ibnd, m, add_to_orbital=.TRUE. )
+#endif
         ENDDO
+#if !defined(__OPENMP_GPU)
         CALL dev_memcpy_h2d(hpsi_d, hpsi_host) ! hpsi_d = hpsi_host
+#else
+        !$omp target update to(hpsi_d)
+#endif
         !
      ELSE
         ! ... usual reciprocal-space algorithm
@@ -225,7 +265,11 @@ SUBROUTINE h_psi__gpu( lda, n, m, psi_d, hpsi_d )
         !
         DO ibnd = 1, m
            ! ... transform psi to real space -> psic
+#if !defined(__OPENMP_GPU)
            CALL invfft_orbital_k(psi_host, ibnd, m )
+#else
+           CALL invfft_orbital_k(psi_d, ibnd, m )
+#endif
            ! ... compute becp%r = < beta|psi> from psic in real space
      CALL start_clock_gpu( 'h_psi:calbec' )
            CALL calbec_rs_k( ibnd, m )
@@ -235,10 +279,20 @@ SUBROUTINE h_psi__gpu( lda, n, m, psi_d, hpsi_d )
            ! ... psic (hpsi) -> psic + vusp
            CALL  add_vuspsir_k( ibnd, m )
            ! ... transform psic back in reciprocal space and add it to hpsi
+#if !defined(__OPENMP_GPU)
            CALL fwfft_orbital_k( hpsi_host, ibnd, m, add_to_orbital=.TRUE. )
+#else
+           CALL fwfft_orbital_k( hpsi_d, ibnd, m, add_to_orbital=.TRUE. )
+#endif
            !
         ENDDO
-        IF (need_host_copy) CALL dev_memcpy_h2d(hpsi_d, hpsi_host) ! hpsi_d = hpsi_host
+        IF (need_host_copy) THEN
+#if !defined(__OPENMP_GPU)
+           CALL dev_memcpy_h2d(hpsi_d, hpsi_host) ! hpsi_d = hpsi_host
+#else
+           !$omp target update to(hpsi_d)
+#endif
+        ENDIF
         !
      ELSE
         !
@@ -270,13 +324,20 @@ SUBROUTINE h_psi__gpu( lda, n, m, psi_d, hpsi_d )
   CALL stop_clock_gpu( 'h_psi:pot' )
   !
   IF (xclib_dft_is('meta')) THEN
+#if !defined(__OPENMP_GPU)
      CALL dev_memcpy_d2h(hpsi_host, hpsi_d) ! hpsi_host = hpsi_d
      call h_psi_meta (lda, n, m, psi_host, hpsi_host)
      CALL dev_memcpy_h2d(hpsi_d, hpsi_host) ! hpsi_d = hpsi_host
+#else
+     !$omp target update from(hpsi_d)
+     call h_psi_meta (lda, n, m, psi_d, hpsi_d)
+     !$omp target update to(hpsi_d)
+#endif
   end if
   !
   ! ... Here we add the Hubbard potential times psi
   !
+#if !defined(__OPENMP_GPU)
   IF ( lda_plus_u .AND. U_projection.NE."pseudo" ) THEN
      !
      CALL dev_memcpy_d2h(hpsi_host, hpsi_d )    ! hpsi_host = hpsi_d
@@ -293,9 +354,28 @@ SUBROUTINE h_psi__gpu( lda, n, m, psi_d, hpsi_d )
      ENDIF
      !
   ENDIF
+#else
+  IF ( lda_plus_u .AND. U_projection.NE."pseudo" ) THEN
+     !
+     !$omp target update from(hpsi_d)
+     IF ( noncolin ) THEN
+        CALL vhpsi_nc( lda, n, m, psi_d, hpsi_d)
+        !$omp target update to(hpsi_d)
+     ELSE
+        IF ( lda_plus_u_kind.EQ.0 .OR. lda_plus_u_kind.EQ.1 ) THEN
+          CALL vhpsi_gpu( lda, n, m, psi_d, hpsi_d )  ! DFT+U
+        ELSEIF ( lda_plus_u_kind.EQ.2 ) THEN          ! DFT+U+V
+          CALL vhpsi( lda, n, m, psi_d, hpsi_d)
+          !$omp target update to(hpsi_d)
+        ENDIF
+     ENDIF
+     !
+  ENDIF
+#endif
   !
   ! ... Here the exact-exchange term Vxx psi
   !
+#if !defined(__OPENMP_GPU)
   IF ( exx_is_active() ) THEN
      CALL dev_memcpy_d2h(hpsi_host, hpsi_d ) ! hpsi_host = hpsi_d
      IF ( use_ace) THEN
@@ -310,9 +390,26 @@ SUBROUTINE h_psi__gpu( lda, n, m, psi_d, hpsi_d )
      END IF
      CALL dev_memcpy_h2d(hpsi_d, hpsi_host) ! hpsi_d = hpsi_host
   END IF
+#else
+  IF ( exx_is_active() ) THEN
+     !$omp target update from(hpsi_d)
+     IF ( use_ace) THEN
+        IF (gamma_only) THEN
+           CALL vexxace_gamma(lda,m,psi_d,ee,hpsi_d)
+        ELSE
+           CALL vexxace_k(lda,m,psi_d,ee,hpsi_d)
+        END IF
+     ELSE
+        CALL using_becp_auto(0)
+        CALL vexx( lda, n, m, psi_d, hpsi_d, becp_d )
+     END IF
+     !$omp target update to(hpsi_d)
+  END IF
+#endif
   !
   ! ... electric enthalpy if required
   !
+#if !defined(__OPENMP_GPU)
   IF ( lelfield ) THEN
      !
      CALL dev_memcpy_d2h(hpsi_host, hpsi_d ) ! hpsi_host = hpsi_d
@@ -326,20 +423,40 @@ SUBROUTINE h_psi__gpu( lda, n, m, psi_d, hpsi_d )
      CALL dev_memcpy_h2d(hpsi_d, hpsi_host) ! hpsi_d = hpsi_host
      !
   END IF
+#else
+  IF ( lelfield ) THEN
+     !
+     !$omp target update from(hpsi_d)
+     IF ( .NOT.l3dstring ) THEN
+        CALL h_epsi_her_apply( lda, n, m, psi_d, hpsi_d, gdir, efield )
+     ELSE
+        DO ipol=1,3
+           CALL h_epsi_her_apply( lda, n, m, psi_d, hpsi_d,ipol,efield_cry(ipol) )
+        END DO
+     END IF
+     !$omp target update to(hpsi_d)
+     !
+  END IF
+#endif
   !
   ! ... With Gamma-only trick, Im(H*psi)(G=0) = 0 by definition,
   ! ... but it is convenient to explicitly set it to 0 to prevent trouble
   !
   IF ( gamma_only .AND. gstart == 2 ) then
       !$cuf kernel do(1)
+      !$omp target teams distribute parallel do
       do i=1,m
          hpsi_d(1,i) = CMPLX( DBLE( hpsi_d(1,i) ), 0.D0 ,kind=DP)
       end do
   end if
   !
+#if !defined(__OPENMP_GPU)
   if (need_host_copy) then
       DEALLOCATE(psi_host , hpsi_host )
   end if
+#else
+  ENDASSOCIATE
+#endif
   CALL stop_clock_gpu( 'h_psi' )
   !
   RETURN

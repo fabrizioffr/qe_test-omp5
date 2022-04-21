@@ -19,10 +19,17 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
   USE lsda_mod,        ONLY: current_spin
   USE control_flags,   ONLY: gamma_only
   USE noncollin_module
-  USE uspp,            ONLY: ofsbeta, nkb, vkb, deeq_d, deeq_nc_d
-  USE uspp_param,      ONLY: nh, nhm
-  USE becmod_gpum,     ONLY: bec_type_d, becp_d, using_becp_r_d, &
-                             using_becp_k_d, using_becp_nc_d
+  USE uspp,            ONLY : ofsbeta, nkb, vkb
+  USE uspp_param,      ONLY : nh, nhm
+#if defined(__OPENMP_GPU)
+  USE uspp,            ONLY : deeq, deeq_nc
+  USE becmod,          ONLY : bec_type, becp
+#else
+  USE uspp,            ONLY : deeq_d, deeq_nc_d
+  USE becmod_gpum,     ONLY : bec_type_d, becp_d
+#endif
+  USE becmod_gpum,     ONLY : using_becp_r_d, using_becp_k_d, using_becp_nc_d
+  !
   IMPLICIT NONE
   !
   ! ... I/O variables
@@ -38,8 +45,10 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
   !
   ! ... here the local variables
   !
+#if defined(__CUDA) || defined(__OPENMP_GPU)
 #if defined(__CUDA)
   attributes(DEVICE) :: hpsi_d
+#endif
   !
   !
   CALL start_clock_gpu( 'add_vuspsi' )
@@ -69,13 +78,19 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
        !-----------------------------------------------------------------------
        !! See comments inside
        !
-       USE mp, ONLY: mp_get_comm_null, mp_circular_shift_left
-       USE device_fbuff_m, ONLY : dev_buf
-       USE distools,       ONLY : ldim_block, gind_block
+       USE mp,              ONLY : mp_get_comm_null, mp_circular_shift_left
+       USE devxlib_buffers, ONLY : dev_buf=>gpu_buffer
+       USE distools,        ONLY : ldim_block, gind_block
        !
 #if defined(__CUDA)
        USE cudafor
        USE cublas
+#elif defined(__OPENMP_GPU)
+#if defined(MKL_ILP64)
+       USE onemkl_blas_omp_offload_ilp64_no_array_check
+#else
+       USE onemkl_blas_omp_offload_lp64_no_array_check
+#endif
 #endif
        !
        IMPLICIT NONE
@@ -93,6 +108,9 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
        !
        CALL using_becp_r_d(0)
        !
+#if defined(__OPENMP_GPU)
+       ASSOCIATE(becp_d=>becp, deeq_d=>deeq, r=>becp%r)
+#endif
        IF( becp_d%comm == mp_get_comm_null() ) THEN
           nproc   = 1
           mype    = 0
@@ -108,7 +126,11 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
           mype    = becp_d%mype
           m_loc   = becp_d%nbnd_loc
           m_begin = becp_d%ibnd_begin
+#if defined(__OPENMP_GPU)
+          m_max   = SIZE( becp_d%r, 2 )
+#else
           m_max   = SIZE( becp_d%r_d, 2 )
+#endif
           IF( ( m_begin + m_loc - 1 ) > m ) m_loc = m - m_begin + 1
        END IF
        !
@@ -117,7 +139,16 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
        IF( ierr /= 0 ) &
           CALL errore( ' add_vuspsi_gamma ', ' cannot allocate ps_d ', ABS(ierr) )
        !
+#if defined(__OPENMP_GPU)
+       !$omp target teams loop collapse(2)
+       do jh=1,m_max
+          do ih=1,nkb
+             ps_d(ih,jh) = 0.D0
+          enddo
+       enddo
+#else
        ps_d(:,:) = 0.D0
+#endif
        !
        !   In becp=<vkb_i|psi_j> terms corresponding to atom na of type nt
        !   run from index i=ofsbeta(na)+1 to i=ofsbeta(na)+nh(nt)
@@ -133,10 +164,16 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
                 ! (l'=l+ijkb0, m'=m+ijkb0, indices run from 1 to nh(nt))
                 !
                 IF ( m_loc > 0 ) THEN
+                  !$omp target variant dispatch use_device_ptr(deeq_d,r)
                   CALL DGEMM('N', 'N', nh(nt), m_loc, nh(nt), 1.0_dp, &
                            deeq_d(1,1,na,current_spin), nhm, &
+#if defined(__OPENMP_GPU)
+                           r(ofsbeta(na)+1,1), nkb, 0.0_dp, &
+#else
                            becp_d%r_d(ofsbeta(na)+1,1), nkb, 0.0_dp, &
+#endif
                                ps_d(ofsbeta(na)+1,1), nkb )
+                  !$omp end target variant dispatch
                 END IF
                 !
              END IF
@@ -152,8 +189,10 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
           !
 !$acc data present(vkb(:,:))
 !$acc host_data use_device(vkb)
+          !$omp target variant dispatch use_device_ptr(vkb,hpsi_d)
           CALL DGEMM( 'N', 'N', ( 2 * n ), m, nkb, 1.D0, vkb, &
                    ( 2 * lda ), ps_d, nkb, 1.D0, hpsi_d, ( 2 * lda ) )
+          !$omp end target variant dispatch
 !$acc end host_data
 !$acc end data
        ELSE
@@ -164,7 +203,8 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
           !
           DO icyc = 0, nproc - 1
 
-             m_loc   = ldim_block( becp_d%nbnd , nproc, icur_blk )
+             !$omp target update from(becp%nbnd)
+             m_loc   = ldim_block( becp_d%nbnd, nproc, icur_blk )
              m_begin = gind_block( 1,  becp_d%nbnd, nproc, icur_blk )
 
              IF( ( m_begin + m_loc - 1 ) > m ) m_loc = m - m_begin + 1
@@ -172,8 +212,10 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
              IF( m_loc > 0 ) THEN
 !$acc data present(vkb(:,:))
 !$acc host_data use_device(vkb)
+                !$omp target variant dispatch use_device_ptr(vkb,hpsi_d)
                 CALL DGEMM( 'N', 'N', ( 2 * n ), m_loc, nkb, 1.D0, vkb, &
                    ( 2 * lda ), ps_d, nkb, 1.D0, hpsi_d( 1, m_begin ), ( 2 * lda ) )
+                !$omp end target variant dispatch
 !$acc end host_data
 !$acc end data
              ENDIF
@@ -189,6 +231,9 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
        ENDIF
        !
        CALL dev_buf%release_buffer(ps_d, ierr) ! DEALLOCATE (ps_d)
+#if defined(__OPENMP_GPU)
+       ENDASSOCIATE
+#endif
        !
        RETURN
        !
@@ -202,14 +247,23 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
 #if defined(__CUDA)
        USE cudafor
        USE cublas
+#elif defined(__OPENMP_GPU)
+#if defined(MKL_ILP64)
+       USE onemkl_blas_omp_offload_ilp64_no_array_check
+#else
+       USE onemkl_blas_omp_offload_lp64_no_array_check
 #endif
-       USE device_fbuff_m, ONLY : dev_buf
+#endif
+       USE devxlib_buffers, ONLY : dev_buf=>gpu_buffer
+       use omp_lib
+       use iso_c_binding
        !
        IMPLICIT NONE
        COMPLEX(DP), POINTER :: ps_d (:,:), deeaux_d (:,:)
        INTEGER :: ierr
        ! counters
        INTEGER :: i, j, k, jkb, ikb, ih, jh, na, nt, ibnd, nhnt
+       COMPLEX(DP) :: temp1, temp2
 
 #if defined(__CUDA)
        ATTRIBUTES( DEVICE ) :: ps_d, deeaux_d
@@ -243,15 +297,32 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
                 !deeaux_d(:,:) = CMPLX(deeq_d(1:nh(nt),1:nh(nt),na,current_spin), 0.0_dp, KIND=dp )
                 !
 !$cuf kernel do(2) <<<*,*>>>
+                !$omp target teams distribute parallel do collapse(2)
                 DO j = 1, nhnt
                    DO k = 1, nhnt
+#if defined(__OPENMP_GPU)
+                      deeaux_d(k,j) = CMPLX(deeq(k,j,na,current_spin), 0.0_dp, KIND=DP )
+#else
                       deeaux_d(k,j) = CMPLX(deeq_d(k,j,na,current_spin), 0.0_dp, KIND=DP )
+#endif
                    END DO
                 END DO
                 !
+#if defined(__OPENMP_GPU)
+                associate(k => becp%k)
+#endif
+                !$omp target variant dispatch use_device_ptr(k, ofsbeta)
                 CALL ZGEMM('N','N', nh(nt), m, nh(nt), (1.0_dp,0.0_dp), &
+#if defined(__OPENMP_GPU)
+                           deeaux_d, nhm, k(ofsbeta(na)+1,1), nkb, &
+#else
                            deeaux_d, nhm, becp_d%k_d(ofsbeta(na)+1,1), nkb, &
+#endif
                           (0.0_dp, 0.0_dp), ps_d(ofsbeta(na)+1,1), nkb )
+                !$omp end target variant dispatch
+#if defined(__OPENMP_GPU)
+                endassociate
+#endif
                 !
              END IF
              !
@@ -262,8 +333,10 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
        !
 !$acc data present(vkb(:,:))
 !$acc host_data use_device(vkb)
+       !$omp target variant dispatch use_device_ptr(vkb,hpsi_d)
        CALL ZGEMM( 'N', 'N', n, m, nkb, ( 1.D0, 0.D0 ) , vkb, &
                    lda, ps_d, nkb, ( 1.D0, 0.D0 ) , hpsi_d, lda )
+       !$omp end target variant dispatch
 !$acc end host_data
 !$acc end data
        !
@@ -281,9 +354,19 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
 #if defined(__CUDA)
        USE cudafor
        USE cublas
+#elif defined(__OPENMP_GPU)
+#if defined(MKL_ILP64)
+       USE onemkl_blas_omp_offload_ilp64_no_array_check
+#else
+       USE onemkl_blas_omp_offload_lp64_no_array_check
 #endif
-       USE device_fbuff_m,      ONLY : dev_buf
+#endif
+       USE devxlib_buffers, ONLY : dev_buf=>gpu_buffer
+#if !defined(__OPENMP_GPU)
        USE becmod_gpum,   ONLY : becp_d
+#else
+       USE becmod,        ONLY : becp
+#endif
        IMPLICIT NONE
        COMPLEX(DP), POINTER :: ps_d (:,:,:)
        INTEGER :: ierr
@@ -295,6 +378,9 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
 #endif
        !
        IF ( nkb == 0 ) RETURN
+#if defined(__OPENMP_GPU)
+       ASSOCIATE(becp_d=>becp, deeq_nc_d=>deeq, nc => becp%nc)
+#endif
        !
        CALL using_becp_nc_d(0)
        !
@@ -313,21 +399,39 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
              !
              IF ( ityp(na) == nt ) THEN
                 !
+                !$omp target variant dispatch use_device_ptr(deeq_nc_d,nc)
                 CALL ZGEMM('N','N', nh(nt), m, nh(nt), (1.0_dp,0.0_dp), &
+#if defined (__OPENMP_GPU)
+                           deeq_nc_d(1,1,na,1), nhm, nc(ofsbeta(na)+1,1,1), 2*nkb, &
+#else
                            deeq_nc_d(1,1,na,1), nhm, becp_d%nc_d(ofsbeta(na)+1,1,1), 2*nkb, &
+#endif
                           (0.0_dp, 0.0_dp), ps_d(ofsbeta(na)+1,1,1), 2*nkb )
 
                 CALL ZGEMM('N','N', nh(nt), m, nh(nt), (1.0_dp,0.0_dp), &
+#if defined (__OPENMP_GPU)
+                           deeq_nc_d(1,1,na,2), nhm, nc(ofsbeta(na)+1,2,1), 2*nkb, &
+#else
                            deeq_nc_d(1,1,na,2), nhm, becp_d%nc_d(ofsbeta(na)+1,2,1), 2*nkb, &
+#endif
                           (1.0_dp, 0.0_dp), ps_d(ofsbeta(na)+1,1,1), 2*nkb )
 
                 CALL ZGEMM('N','N', nh(nt), m, nh(nt), (1.0_dp,0.0_dp), &
+#if defined (__OPENMP_GPU)
+                           deeq_nc_d(1,1,na,3), nhm, nc(ofsbeta(na)+1,1,1), 2*nkb, &
+#else
                            deeq_nc_d(1,1,na,3), nhm, becp_d%nc_d(ofsbeta(na)+1,1,1), 2*nkb, &
+#endif
                           (0.0_dp, 0.0_dp), ps_d(ofsbeta(na)+1,2,1), 2*nkb )
 
                 CALL ZGEMM('N','N', nh(nt), m, nh(nt), (1.0_dp,0.0_dp), &
+#if defined (__OPENMP_GPU)
+                           deeq_nc_d(1,1,na,4), nhm, nc(ofsbeta(na)+1,2,1), 2*nkb, &
+#else
                            deeq_nc_d(1,1,na,4), nhm, becp_d%nc_d(ofsbeta(na)+1,2,1), 2*nkb, &
+#endif
                           (1.0_dp, 0.0_dp), ps_d(ofsbeta(na)+1,2,1), 2*nkb )
+                !$omp end target variant dispatch
 
 !                DO ibnd = 1, m
 !                   !
@@ -362,12 +466,17 @@ SUBROUTINE add_vuspsi_gpu( lda, n, m, hpsi_d )
        !
 !$acc data present(vkb(:,:))
 !$acc host_data use_device(vkb)
+       !$omp target variant dispatch use_device_ptr(vkb,hpsi_d)
        call ZGEMM ('N', 'N', n, m*npol, nkb, ( 1.D0, 0.D0 ) , vkb, &
                    lda, ps_d, nkb, ( 1.D0, 0.D0 ) , hpsi_d, lda )
+       !$omp end target variant dispatch
 !$acc end host_data
 !$acc end data
        !
        CALL dev_buf%release_buffer(ps_d, ierr ) ! DEALLOCATE (ps_d)
+#if defined(__OPENMP_GPU)
+       ENDASSOCIATE
+#endif
        !
        RETURN
        !

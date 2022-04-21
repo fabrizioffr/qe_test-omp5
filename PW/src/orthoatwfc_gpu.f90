@@ -17,8 +17,8 @@ SUBROUTINE orthoUwfc_gpu
   !-----------------------------------------------------------------------
   !
   ! This routine saves to buffer "iunhub" atomic wavefunctions having an
-  ! associated Hubbard U term * S, for DFT+U(+V) calculations. Same for 
-  ! "iunhub2" but without S (this is then used to computed Hubbard forces 
+  ! associated Hubbard U term * S, for DFT+U(+V) calculations. Same for
+  ! "iunhub2" but without S (this is then used to computed Hubbard forces
   ! and stresses). Atomic wavefunctions
   ! are orthogonalized if desired, depending upon the value of "U_projection"
   ! "swfcatom" must NOT be allocated on input.
@@ -39,11 +39,13 @@ SUBROUTINE orthoUwfc_gpu
   USE noncollin_module, ONLY : noncolin, npol
   USE mp_bands,         ONLY : use_bgrp_in_hpsi
   !
+#if !defined(__OPENMP_GPU)
   USE becmod_gpum,      ONLY : becp_d
+#endif
   USE becmod_subs_gpum, ONLY : using_becp_auto, using_becp_d_auto, &
                                calbec_gpu
   USE uspp_init,        ONLY : init_us_2
-  ! 
+  !
   IMPLICIT NONE
   !
   !
@@ -54,12 +56,14 @@ SUBROUTINE orthoUwfc_gpu
   LOGICAL :: orthogonalize_wfc, normalize_only, save_flag
   COMPLEX(DP) , ALLOCATABLE :: wfcatom (:,:)
   !
+#if !defined(__OPENMP_GPU)
   COMPLEX(DP) , ALLOCATABLE :: wfcatom_d(:,:)
   COMPLEX(DP) , ALLOCATABLE :: swfcatom_d(:,:)
   !
 #if defined(__CUDA)
   attributes(DEVICE) :: wfcatom_d, swfcatom_d
-#endif  
+#endif
+#endif
   !
   IF ( U_projection == "pseudo" ) THEN
      WRITE( stdout,*) 'Beta functions used for LDA+U Projector'
@@ -67,7 +71,7 @@ SUBROUTINE orthoUwfc_gpu
   ELSE IF (U_projection=="file") THEN
      !
      ! Read atomic wavefunctions from file (produced by pmw.x). In this case,
-     ! U-specific atomic wavefunctions wfcU coincide with atomic wavefunctions 
+     ! U-specific atomic wavefunctions wfcU coincide with atomic wavefunctions
      !
      WRITE( stdout,*) 'LDA+U Projector read from file '
      DO ik = 1, nks
@@ -80,7 +84,7 @@ SUBROUTINE orthoUwfc_gpu
      WRITE( stdout,*) 'Atomic wfc used for LDA+U Projector are NOT orthogonalized'
   ELSE IF (U_projection=="ortho-atomic") THEN
      orthogonalize_wfc = .TRUE.
-     normalize_only = .FALSE.    
+     normalize_only = .FALSE.
      WRITE( stdout,*) 'Atomic wfc used for LDA+U Projector are orthogonalized'
      IF (gamma_only) CALL errore('orthoUwfc', &
           'Gamma-only calculation for this case not implemented', 1 )
@@ -96,18 +100,29 @@ SUBROUTINE orthoUwfc_gpu
   END IF
   !
   ALLOCATE( wfcatom(npwx*npol,natomwfc), swfcatom(npwx*npol,natomwfc) )
+#if defined(__CUDA)
   ALLOCATE( wfcatom_d(npwx*npol,natomwfc), swfcatom_d(npwx*npol,natomwfc) )               !
+#elif defined(__OPENMP_GPU)
+  !$omp target enter data map(alloc:wfcatom, swfcatom)
+#endif
   save_flag = use_bgrp_in_hpsi ; use_bgrp_in_hpsi=.false.
 
   ! Allocate the array becp = <beta|wfcatom>
-  CALL allocate_bec_type (nkb,natomwfc, becp) 
+  CALL allocate_bec_type (nkb,natomwfc, becp)
   CALL using_becp_auto(2)
-  
+
+#if defined(__OPENMP_GPU)
+  associate(wfcatom_d => wfcatom, swfcatom_d => swfcatom, becp_d => becp)
+#endif
   DO ik = 1, nks
-     
+
      IF (noncolin) THEN
        CALL atomic_wfc_nc_updown( ik, wfcatom )
+#if defined(__CUDA)
        wfcatom_d = wfcatom
+#elif defined(__OPENMP_GPU)
+       !$omp target update to(wfcatom)
+#endif
      ELSE
        CALL atomic_wfc_gpu( ik, wfcatom_d )
      ENDIF
@@ -132,15 +147,24 @@ SUBROUTINE orthoUwfc_gpu
      ! (this is used during the self-consistent solution of Kohn-Sham equations)
      ! save to unit iunhub
      !
+#if defined(__OPENMP_GPU)
+     !$omp target update from(swfcatom)
+#else
      swfcatom = swfcatom_d
+#endif
      CALL copy_U_wfc (swfcatom, noncolin)
      IF ( nks > 1 ) &
           CALL save_buffer (wfcU, nwordwfcU, iunhub, ik)
      !
   ENDDO
   !
-  DEALLOCATE( wfcatom, swfcatom )
+#if defined(__OPENMP_GPU)
+  endassociate
+  !$omp target exit data map(delete:wfcatom, swfcatom)
+#else
   DEALLOCATE( wfcatom_d, swfcatom_d )
+#endif
+  DEALLOCATE( wfcatom, swfcatom )
   !
   CALL deallocate_bec_type( becp )
   CALL using_becp_auto(2)
@@ -148,7 +172,7 @@ SUBROUTINE orthoUwfc_gpu
   use_bgrp_in_hpsi = save_flag
   !
   RETURN
-     
+
 END SUBROUTINE orthoUwfc_gpu
 !
 !-----------------------------------------------------------------------
@@ -166,18 +190,21 @@ SUBROUTINE orthoatwfc_gpu( orthogonalize_wfc )
   USE io_files,   ONLY : iunsat, nwordatwfc
   USE ions_base,  ONLY : nat
   USE basis,      ONLY : natomwfc, swfcatom
-  USE klist,      ONLY : nks, xk, ngk, igk_k, igk_k_d
+  USE klist,      ONLY : nks, xk, ngk, igk_k
   USE wvfct,      ONLY : npwx
   USE uspp,       ONLY : nkb, vkb
   USE becmod,     ONLY : allocate_bec_type, deallocate_bec_type, &
                          bec_type, becp, calbec
   USE control_flags,    ONLY : gamma_only
   USE noncollin_module, ONLY : noncolin, npol
+#if !defined(__OPENMP_GPU)
   USE becmod_gpum,      ONLY : becp_d
+  USE klist,            ONLY : igk_k_d
+#endif
   USE becmod_subs_gpum, ONLY : using_becp_auto, using_becp_d_auto, &
                                calbec_gpu
   USE uspp_init,        ONLY : init_us_2
-  ! 
+  !
   IMPLICIT NONE
   !
   LOGICAL, INTENT(IN) :: orthogonalize_wfc
@@ -188,25 +215,36 @@ SUBROUTINE orthoatwfc_gpu( orthogonalize_wfc )
   ! ibnd: counter on bands
   LOGICAL :: normalize_only = .FALSE.
   COMPLEX(DP), ALLOCATABLE :: wfcatom(:,:)
+#if !defined(__OPENMP_GPU)
   COMPLEX(DP), ALLOCATABLE :: wfcatom_d(:,:), swfcatom_d(:,:)
   !
 #if defined(__CUDA)
   attributes(DEVICE) :: wfcatom_d, swfcatom_d
 #endif
+#endif
   !
   normalize_only=.FALSE.
   ALLOCATE( wfcatom(npwx*npol,natomwfc) )
+#if !defined(__OPENMP_GPU)
   ALLOCATE( wfcatom_d(npwx*npol,natomwfc), swfcatom_d(npwx*npol,natomwfc) )
+#endif
   !
   ! Allocate the array becp = <beta|wfcatom>
   CALL allocate_bec_type( nkb, natomwfc, becp )
   !
-  
+
+#if defined(__OPENMP_GPU)
+  associate(wfcatom_d => wfcatom, igk_k_d => igk_k, swfcatom_d => swfcatom, becp_d => becp)
+#endif
   DO ik = 1, nks
      !
      IF (noncolin) THEN
        CALL atomic_wfc_nc_updown( ik, wfcatom )
+#if defined(__OPENMP_GPU)
+       !$omp target update to(wfcatom)
+#else
        wfcatom_d = wfcatom
+#endif
      ELSE
        CALL atomic_wfc_gpu( ik, wfcatom_d )
      ENDIF
@@ -230,14 +268,23 @@ SUBROUTINE orthoatwfc_gpu( orthogonalize_wfc )
      !
      ! write S * atomic wfc to unit iunsat
      !
+#if defined(__OPENMP_GPU)
+     !$omp target update from(swfcatom)
+#else
      swfcatom = swfcatom_d
+#endif
      !
      CALL save_buffer( swfcatom, nwordatwfc, iunsat, ik )
      !
   ENDDO
   !
-  DEALLOCATE( wfcatom )
+#if defined(__OPENMP_GPU)
+  endassociate
+  !$omp target exit data map(delete:wfcatom, swfcatom)
+#else
   DEALLOCATE( wfcatom_d, swfcatom_d )
+#endif
+  DEALLOCATE( wfcatom )
   CALL deallocate_bec_type( becp )
   !
   RETURN
@@ -248,18 +295,26 @@ END SUBROUTINE orthoatwfc_gpu
 SUBROUTINE ortho_swfc_gpu( npw, normalize_only, m, wfc_d, swfc_d, lflag )
   !-----------------------------------------------------------------------
   !
-  ! On input : 
+  ! On input :
   ! wfc (npwx*npol,m) =  \phi = a set of "m" (atomic) wavefcts
-  ! swfc(npwx*npol,m) = S\phi 
+  ! swfc(npwx*npol,m) = S\phi
   ! normalize_only    = only normalize, do not orthonormalize
   !
-  ! On output this routine will compute the overlap matrix O: 
+  ! On output this routine will compute the overlap matrix O:
   ! O_ij = <wfc_i|S|wfc_j> = <wfc_i|swfc_j>
   ! If lflag=.FALSE. : wfc are unchanged,   swfc = O^{-1/2} S\phi.
   ! If lflag=.TRUE.  : wfc = O^{-1/2} \phi, swfc are unchanged.
   !
 #if defined(__CUDA)
   USE cublas
+#elif defined(__OPENMP_GPU)
+  USE omp_lib
+#if defined(MKL_ILP64)
+  USE onemkl_blas_omp_offload_ilp64
+#else
+  USE onemkl_blas_omp_offload_lp64
+#endif
+  USE dmr
 #endif
   !
   USE kinds,            ONLY : DP
@@ -280,37 +335,63 @@ SUBROUTINE ortho_swfc_gpu( npw, normalize_only, m, wfc_d, swfc_d, lflag )
   ! ... local variables
   !
   INTEGER :: i, j, k, ipol
-  COMPLEX(DP) :: temp 
+  COMPLEX(DP) :: temp
   !
+  COMPLEX(DP), ALLOCATABLE :: s_d(:,:)
+#if !defined(__OPENMP_GPU)
   COMPLEX(DP), ALLOCATABLE :: overlap_d(:,:)
-  COMPLEX(DP), ALLOCATABLE :: work_d(:,:), s_d(:,:)
+  COMPLEX(DP), ALLOCATABLE :: work_d(:,:)
   REAL(DP) , ALLOCATABLE :: e_d(:)
   !
 #if defined(__CUDA)
   attributes(DEVICE) :: wfc_d, swfc_d, overlap_d, work_d, s_d, e_d
-#endif  
+#endif
+#endif
   !
+#if defined(__OPENMP_GPU)
+  !$omp target enter data map(alloc:eigenval, eigenvect, overlap_inv)
+  !$omp allocate allocator(omp_target_device_mem_alloc)
+  ALLOCATE( s_d(m,m) )
+#else
   ALLOCATE( overlap_d(m,m) )
   ALLOCATE( work_d(m,m), s_d(m,m) )
   ALLOCATE( e_d(m) )
+#endif
   !
+#if defined(__OPENMP_GPU)
+  associate(overlap_d=>overlap_inv, e_d=>eigenval, work_d=>eigenvect)
+  !$omp target teams distribute parallel do collapse(2)
+  do j=1,m
+     do i=1,m
+        overlap_d(i,j) = (0.d0,0.d0)
+        work_d   (i,j) = (0.d0,0.d0)
+     enddo
+  enddo
+#else
   overlap_d(:,:) = (0.d0,0.d0)
   work_d(:,:) = (0.d0,0.d0)
+#endif
   !
   ! calculate overlap matrix
   !
   IF (noncolin) THEN
+     !$omp target variant dispatch use_device_ptr(wfc_d, swfc_d, overlap_d)
      CALL cublasZgemm( 'C', 'N', m, m, npwx*npol, (1.d0,0.d0), wfc_d, &
                       npwx*npol, swfc_d, npwx*npol, (0.d0,0.d0), overlap_d, m )
+     !$omp end target variant dispatch
   ELSE
+     !$omp target variant dispatch use_device_ptr(wfc_d, swfc_d, overlap_d)
      CALL cublasZgemm( 'C', 'N', m, m, npw, (1.d0,0.d0), wfc_d, &
                       npwx, swfc_d, npwx, (0.d0,0.d0), overlap_d, m )
+     !$omp end target variant dispatch
   END IF
   !
+  !$omp dispatch
   CALL mp_sum( overlap_d, intra_bgrp_comm )
   !
   IF ( normalize_only ) THEN
      !$cuf kernel do (1) <<<*,*>>>
+     !$omp target teams distribute parallel do
      DO i = 1, m
         DO j = i+1, m
            overlap_d(i,j) = CMPLX(0.d0,0.d0, kind=dp)
@@ -323,6 +404,7 @@ SUBROUTINE ortho_swfc_gpu( npw, normalize_only, m, wfc_d, swfc_d, lflag )
   !
   ! s_d = CMPLX(0.d0,0.d0, kind=dp)  ! fused below
   !$cuf kernel do (2)
+  !$omp target teams distribute parallel do collapse(2)
   DO i = 1, m
      DO j = 1, m
         s_d(j,i) = CMPLX(0.d0,0.d0, kind=dp)
@@ -334,6 +416,7 @@ SUBROUTINE ortho_swfc_gpu( npw, normalize_only, m, wfc_d, swfc_d, lflag )
                            root_bgrp, intra_bgrp_comm )
   !
   !$cuf kernel do (2) <<<*,*>>>
+  !$omp target teams distribute parallel do collapse(2)
   DO i = 1, m
      DO j = 1, m
         IF ( j < i ) CYCLE
@@ -348,62 +431,88 @@ SUBROUTINE ortho_swfc_gpu( npw, normalize_only, m, wfc_d, swfc_d, lflag )
   !
   IF (lflag) THEN
      !
-     ! Save quantities which are needed for 
+     ! Save quantities which are needed for
      ! calculations of Hubbard forces and stress
+#if defined(__OPENMP_GPU)
+     !$omp target update from(eigenval, eigenvect, overlap_inv)
+#else
      eigenval(:) = e_d(:)
      eigenvect(:,:) = work_d(:,:)
      overlap_inv(:,:) = overlap_d(:,:)
+#endif
      !
-     ! Transform atomic orbitals WITHOUT the ultrasoft S operator 
+     ! Transform atomic orbitals WITHOUT the ultrasoft S operator
      ! O^(-1/2) \psi (note the transposition):
      ! \phi_I = \sum_J O^{-1/2}_JI \phi_J
      !
      DO i = 1, npw
+#if defined(__OPENMP_GPU)
+        !$omp target teams distribute parallel do
+        do k=1,m
+           work_d(k,1) = (0.d0,0.d0)
+        enddo
+        !$omp end target teams distribute parallel do
+#else
         work_d(:,1) = (0.d0,0.d0)
+#endif
         IF (noncolin) THEN
            DO ipol=1,npol
               j = i + (ipol-1)*npwx
+              !$omp target variant dispatch use_device_ptr(wfc_d, work_d, overlap_d)
               CALL cublasZgemv ('n',m,m,(1.d0,0.d0),overlap_d, &
                    m, wfc_d(j,1), npwx*npol, (0.d0,0.d0),work_d,1)
               CALL zcopy (m,work_d,1,wfc_d(j,1),npwx*npol)
+              !$omp end target variant dispatch
            END DO
         ELSE
+           !$omp target variant dispatch use_device_ptr(wfc_d, work_d, overlap_d)
            CALL cublasZgemv ('n', m, m, (1.d0, 0.d0) , overlap_d, &
                 m, wfc_d (i, 1) , npwx, (0.d0, 0.d0) , work_d, 1)
            CALL zcopy (m, work_d, 1, wfc_d (i, 1), npwx)
+           !$omp end target variant dispatch
         END IF
      ENDDO
      !
   ELSE
      !
-     ! Transform atomic orbitals WITH the ultrasoft S operator 
+     ! Transform atomic orbitals WITH the ultrasoft S operator
      ! O^(-1/2) \Spsi (note the transposition):
      ! \Sphi_I = \sum_J O^{-1/2}_JI \Sphi_J
-     ! FIXME: can be done in a faster way by using wfc as work space 
+     ! FIXME: can be done in a faster way by using wfc as work space
      !
      DO i = 1, npw
         work_d(:,1) = (0.d0,0.d0)
         IF (noncolin) THEN
            DO ipol=1,npol
               j = i + (ipol-1)*npwx
+              !$omp target variant dispatch use_device_ptr(swfc_d, work_d, overlap_d)
               CALL cublasZgemv( 'N', m, m, (1.d0,0.d0), overlap_d, &
                                 m, swfc_d(j,1), npwx*npol, (0.d0,0.d0), work_d, 1 )
               CALL cublasZcopy( m, work_d, 1, swfc_d(j,1), npwx*npol )
+              !$omp end target variant dispatch
            END DO
         ELSE
+           !$omp target variant dispatch use_device_ptr(swfc_d, work_d, overlap_d)
            CALL cublasZgemv( 'N', m, m, (1.d0,0.d0), overlap_d, &
                              m, swfc_d(i,1), npwx, (0.d0,0.d0), work_d, 1 )
            CALL cublasZcopy( m, work_d, 1, swfc_d(i,1), npwx )
+           !$omp end target variant dispatch
         END IF
      ENDDO
      !
   ENDIF
   !
+#if defined(__OPENMP_GPU)
+  endassociate
+  !$omp target exit data map(delete:eigenval, eigenvect, overlap_inv)
+  DEALLOCATE( s_d )
+#else
   DEALLOCATE( overlap_d, s_d )
   DEALLOCATE( work_d, e_d )
+#endif
   !
   RETURN
-  !      
+  !
 END SUBROUTINE ortho_swfc_gpu
 
 !
@@ -411,14 +520,16 @@ END SUBROUTINE ortho_swfc_gpu
 SUBROUTINE calculate_doverlap_inv_gpu (m, e, work, doverlap, doverlap_inv)
   !---------------------------------------------------------------------
   !! This routine computes the derivative of O^{-1/2}, i.e.
-  !! [d((O^{-1/2}))]_IJ, where O_IJ is the overlap matrix. 
+  !! [d((O^{-1/2}))]_IJ, where O_IJ is the overlap matrix.
   !! Note, on the input this routine requires dO (not transposed).
   !! The solution is written in a closed form by solving the Lyapunov
   !! equation (a particular case of the Sylvester equation).
   !! Written by I. Timrov (June 2020)
   !
-#if defined(__CUDA)  
+#if defined(__CUDA)
   USE cublas
+#elif defined(__OPENMP_GPU)
+  USE omp_lib
 #endif
   USE kinds,       ONLY : DP
   !
@@ -427,13 +538,13 @@ SUBROUTINE calculate_doverlap_inv_gpu (m, e, work, doverlap, doverlap_inv)
   ! I/O variables
   !
   INTEGER, INTENT(IN)      :: m
-  !! The total number of atomic functions 
+  !! The total number of atomic functions
   REAL(DP), INTENT(IN)     :: e(m)
   !! The eigenvalues of the overlap matrix
   COMPLEX(DP), INTENT(IN)  :: work(m,m)
   !! The eigenvectors of the overlap matrix
   COMPLEX(DP), INTENT(IN)  :: doverlap(m,m)
-  !! The derivative of the overlap matrix O_IJ (not transposed)  
+  !! The derivative of the overlap matrix O_IJ (not transposed)
   COMPLEX(DP), INTENT(OUT) :: doverlap_inv(m,m)
   !! The derivative of transposed O^{-1/2}
   !
@@ -443,22 +554,26 @@ SUBROUTINE calculate_doverlap_inv_gpu (m, e, work, doverlap, doverlap_inv)
   !! eigenvectors of the overlap matrix
   !! auxiliary array
   !
-#if defined(__CUDA)  
+#if defined(__CUDA)
   attributes(DEVICE) :: e, work, doverlap, doverlap_inv, aux
 #endif
+  !$omp allocate allocator(omp_target_device_mem_alloc)
   ALLOCATE (aux(m,m))
   !
-  ! Compute (work^H) * doverlap * work 
+  ! Compute (work^H) * doverlap * work
   ! and put the result back in doverlap
   !
   ! Compute aux = doverlap * work
+  !$omp target variant dispatch use_device_ptr(work, aux, doverlap)
   CALL ZGEMM('N','N', m, m, m, (1.d0,0.d0), doverlap, &
               m, work, m, (0.d0,0.d0), aux, m)
   ! Compute (work^H) * aux
   CALL ZGEMM('C','N', m, m, m, (1.d0,0.d0), work, &
               m, aux, m, (0.d0,0.d0), doverlap, m)
+  !$omp end target variant dispatch
   !
   !$cuf kernel do(2)
+  !$omp target teams distribute parallel do collapse(2)
   DO m1 = 1, m
      DO m2 = 1, m
         aux(m1,m2) = doverlap(m1,m2) / &
@@ -469,11 +584,13 @@ SUBROUTINE calculate_doverlap_inv_gpu (m, e, work, doverlap, doverlap_inv)
   ! Compute work * aux * (work^H)
   !
   ! Compute doverlap = aux * (work^H)
+  !$omp target variant dispatch use_device_ptr(work, aux, doverlap)
   CALL ZGEMM('N','C', m, m, m, (1.d0,0.d0), aux, &
               m, work, m, (0.d0,0.d0), doverlap, m)
   ! Compute doverlap_inv = work * doverlap
   CALL ZGEMM('N','N', m, m, m, (-1.d0,0.d0), work, &
               m, doverlap, m, (0.d0,0.d0), doverlap_inv, m)
+  !$omp end target variant dispatch
   !
   DEALLOCATE (aux)
   !

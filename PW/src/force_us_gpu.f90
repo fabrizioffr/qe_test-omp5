@@ -16,7 +16,12 @@ SUBROUTINE force_us_gpu( forcenl )
   USE cell_base,            ONLY : at, bg, tpiba
   USE ions_base,            ONLY : nat, ntyp => nsp, ityp
   USE klist,                ONLY : nks, xk, ngk, igk_k
-  USE gvect,                ONLY : g_d
+#if defined(__OPENMP_GPU)
+  USE gvect,                ONLY : g
+#else
+  USE klist,                ONLY : igk_k_d
+  USE gvect_gpum,           ONLY : g_d
+#endif
   USE uspp,                 ONLY : nkb, vkb, qq_at, deeq, qq_so, deeq_nc, ofsbeta
   USE uspp_param,           ONLY : upf, nh, nhm
   USE wvfct,                ONLY : nbnd, npwx, wg, et
@@ -29,7 +34,11 @@ SUBROUTINE force_us_gpu( forcenl )
   USE buffers,              ONLY : get_buffer
   USE becmod,               ONLY : calbec, becp, bec_type, allocate_bec_type, &
                                    deallocate_bec_type
+#if defined(__OPENMP_GPU)
+  USE becmod,               ONLY : becp, bec_type
+#else
   USE becmod_gpum,          ONLY : becp_d, bec_type_d
+#endif
   USE becmod_subs_gpum,     ONLY : using_becp_d_auto, calbec_gpu
   USE mp_pools,             ONLY : inter_pool_comm
   USE mp_bands,             ONLY : intra_bgrp_comm
@@ -39,9 +48,9 @@ SUBROUTINE force_us_gpu( forcenl )
   USE becmod_subs_gpum,     ONLY : using_becp_auto, allocate_bec_type_gpu, &
                                    synchronize_bec_type_gpu
   USE uspp_init,            ONLY : init_us_2
-#if defined(__CUDA)
-  USE device_fbuff_m,       ONLY : dev_buf
+#if defined(__CUDA) || defined(__OPENMP_GPU)
   USE control_flags,        ONLY : use_gpu
+  USE devxlib_buffers,      ONLY : dev_buf=>gpu_buffer
 #endif
   !
   IMPLICIT NONE
@@ -52,25 +61,32 @@ SUBROUTINE force_us_gpu( forcenl )
   ! ... local variables
   !
   COMPLEX(DP), ALLOCATABLE :: vkb1(:,:)   ! contains g*|beta>
-  !$acc declare device_resident(vkb1)  
+  !$acc declare device_resident(vkb1)
   !
   COMPLEX(DP), ALLOCATABLE :: deff_nc(:,:,:,:)
   REAL(DP), ALLOCATABLE :: deff(:,:,:)
   TYPE(bec_type)           :: dbecp                 ! contains <dbeta|psi>
+#if !defined(__OPENMP_GPU)
   TYPE(bec_type_d), TARGET :: dbecp_d               ! contains <dbeta|psi>
+#endif
   INTEGER    :: npw, ik, ipol, ig, jkb
   INTEGER    :: ierr
-#if defined(__CUDA)
+#if defined(__CUDA) || defined(__OPENMP_GPU)
   !
   forcenl(:,:) = 0.D0
   !
-  call start_clock_gpu('fus_allbec') 
+  call start_clock_gpu('fus_allbec')
   CALL allocate_bec_type ( nkb, nbnd, becp, intra_bgrp_comm )
   CALL using_becp_auto(2)
   CALL allocate_bec_type ( nkb, nbnd, dbecp, intra_bgrp_comm )
+#if defined(__OPENMP_GPU)
+  CALL allocate_bec_type_gpu ( nkb, nbnd, dbecp, intra_bgrp_comm )
+#else
   CALL allocate_bec_type_gpu ( nkb, nbnd, dbecp_d, intra_bgrp_comm )
+#endif
   !
   ALLOCATE( vkb1(npwx, nkb) )
+  !$omp target enter data map(alloc:vkb1)
   !
   IF (noncolin) THEN
      ALLOCATE( deff_nc(nhm,nhm,nat,nspin) )
@@ -81,7 +97,7 @@ SUBROUTINE force_us_gpu( forcenl )
   ! ... the forces are a sum over the K points and over the bands
   !
   CALL using_evc_d(0)
-  call stop_clock_gpu('fus_allbec') 
+  call stop_clock_gpu('fus_allbec')
   !
   DO ik = 1, nks
      !
@@ -97,31 +113,45 @@ SUBROUTINE force_us_gpu( forcenl )
      CALL using_evc_d(0)
      CALL using_becp_d_auto(2)
      !
+#if defined(__OPENMP_GPU)
+     CALL calbec_gpu ( npw, vkb, evc, becp)
+#else
      !$acc data present(vkb(:,:))
      !$acc host_data use_device(vkb)
      CALL calbec_gpu ( npw, vkb, evc_d, becp_d )
      !$acc end host_data
      !$acc end data
+#endif
      !
      CALL using_evc_d(0)
      DO ipol = 1, 3
        !
        !$acc data present(vkb(:,:), vkb1(1:npwx,1:nkb), igk_k(:,:))
-       !$acc parallel loop collapse(2) 
+       !$acc parallel loop collapse(2)
+      !$omp target teams distribute parallel do collapse(2)
         DO jkb = 1, nkb
            DO ig = 1, npw
+#if defined(__OPENMP_GPU)
+              vkb1(ig,jkb) = vkb(ig,jkb) * (0.D0,-1.D0) * g  (ipol,igk_k  (ig,ik))
+#else
               vkb1(ig,jkb) = vkb(ig,jkb) * (0.D0,-1.D0) * g_d(ipol,igk_k(ig,ik))
+#endif
            ENDDO
         ENDDO
         !$acc end data
         !
-        !$acc data present(vkb1(1:npwx,1:nkb)) 
+#if defined(__OPENMP_GPU)
+        CALL calbec_gpu ( npw, vkb1, evc, dbecp )
+        CALL synchronize_bec_type_gpu(dbecp, 'h')
+#else
+        CALL calbec_gpu ( npw, vkb1, evc_d, dbecp_d )
+        !$acc data present(vkb1(1:npwx,1:nkb))
         !$acc host_data use_device(vkb1)
         CALL calbec_gpu ( npw, vkb1, evc_d, dbecp_d )
-        !$acc end host_data 
+        !$acc end host_data
         !$acc end data
-        !
         CALL synchronize_bec_type_gpu(dbecp_d, dbecp, 'h')
+#endif
         !
         IF ( gamma_only ) THEN
            !
@@ -146,9 +176,10 @@ SUBROUTINE force_us_gpu( forcenl )
      DEALLOCATE( deff )
   ENDIF
   !
+  !$omp target exit data map(delete:vkb1)
   DEALLOCATE( vkb1 )
   !
-  CALL deallocate_bec_type ( dbecp ) 
+  CALL deallocate_bec_type ( dbecp )
   CALL deallocate_bec_type ( becp )
   CALL using_becp_auto(2)
   CALL using_becp_d_auto(2)
@@ -158,13 +189,13 @@ SUBROUTINE force_us_gpu( forcenl )
   CALL mp_sum( forcenl, inter_pool_comm )
   !
   ! ... The total D matrix depends on the ionic position via the
-  ! ... augmentation part \int V_eff Q dr, the term deriving from the 
+  ! ... augmentation part \int V_eff Q dr, the term deriving from the
   ! ... derivative of Q is added in the routine addusforce
   !
-  IF (use_gpu) CALL addusforce_gpu(forcenl)  
+  IF (use_gpu) CALL addusforce_gpu(forcenl)
   IF (.NOT. use_gpu) CALL addusforce( forcenl )
   !
-  ! ... Since our summation over k points was only on the irreducible 
+  ! ... Since our summation over k points was only on the irreducible
   ! ... BZ we have to symmetrize the forces.
   !
   CALL symvector ( nat, forcenl )
@@ -181,10 +212,17 @@ SUBROUTINE force_us_gpu( forcenl )
        !
 #if defined(__CUDA)
        USE cublas
+#elif defined(__OPENMP_GPU)
+       USE onemkl_blas_omp_offload
 #endif
+#if defined(__OPENMP_GPU)
+       USE uspp,                 ONLY : qq_at, deeq
+       USE wvfct,                ONLY : wg, et
+#else
        USE uspp,                 ONLY : qq_at_d, deeq_d
-       USE wvfct_gpum,           ONLY : wg_d, using_wg_d, et_d, using_et_d
-       !
+       USE wvfct_gpum,           ONLY : wg_d, et_d
+#endif
+       USE wvfct_gpum,           ONLY : using_wg_d, using_et_d
        IMPLICIT NONE
        !
        REAL(DP) :: forcenl(3,nat)
@@ -204,6 +242,8 @@ SUBROUTINE force_us_gpu( forcenl )
        REAL(DP) :: forcenl_ipol
 #if defined(__CUDA)
        attributes(DEVICE) :: dbecp_d_r_d, becp_d_r_d
+#endif
+#if defined(__CUDA) || defined(__OPENMP_GPU)
        !
        ! ... Important notice about parallelization over the band group of processors:
        ! ... 1) internally, "calbec" parallelises on plane waves over the band group
@@ -215,47 +255,88 @@ SUBROUTINE force_us_gpu( forcenl )
        CALL using_et_d(0)
        CALL using_wg_d(0)
        !!!!! CHECK becp (set above)
+#if defined(__OPENMP_GPU)
+       becp_d_ibnd_begin = becp%ibnd_begin
+       becp_d_nbnd_loc = becp%nbnd_loc
+#else
        becp_d_ibnd_begin = becp_d%ibnd_begin
        becp_d_nbnd_loc = becp_d%nbnd_loc
+#endif
 
+#if !defined(__OPENMP_GPU)
        dbecp_d_r_d => dbecp_d%r_d
        becp_d_r_d  => becp_d%r_d
+#endif
 
        DO nt = 1, ntyp
           IF ( nh(nt) == 0 ) CYCLE
+#if defined(__OPENMP_GPU)
+          CALL dev_buf%lock_buffer(aux_d, (/nh(nt),becp%nbnd_loc/), ierr ) !ALLOCATE ( aux(nh(nt),becp%nbnd_loc) )
+#else
           CALL dev_buf%lock_buffer(aux_d, (/nh(nt),becp_d%nbnd_loc/), ierr ) !ALLOCATE ( aux(nh(nt),becp%nbnd_loc) )
+#endif
           nh_nt = nh(nt)
-          
+
           DO na = 1, nat
              IF ( ityp(na) == nt ) THEN
                 ijkb0 = ofsbeta(na)
                 ! this is \sum_j q_{ij} <beta_j|psi>
+#if defined(__OPENMP_GPU)
+                associate(r => becp%r)
+                   !$omp target variant dispatch use_device_ptr(qq_at, r, aux_d)
+                   CALL DGEMM ('N','N', nh(nt), becp%nbnd_loc, nh(nt), &
+                        1.0_dp, qq_at(1,1,na), nhm, r(ijkb0+1,1),&
+                        nkb, 0.0_dp, aux_d, nh(nt) )
+                   !$omp end target variant dispatch
+                endassociate
+#else
                 CALL DGEMM ('N','N', nh(nt), becp_d%nbnd_loc, nh(nt), &
                      1.0_dp, qq_at_d(1,1,na), nhm, becp_d%r_d(ijkb0+1,1),&
                      nkb, 0.0_dp, aux_d, nh(nt) )
+#endif
                 ! multiply by -\epsilon_n
 !$cuf kernel do(2)
+!$omp target teams distribute parallel do collapse(2)
                 DO ih = 1, nh_nt
                    DO ibnd_loc = 1, becp_d_nbnd_loc
                       ibnd = ibnd_loc + becp_d_ibnd_begin - 1
+#if defined(__OPENMP_GPU)
+                      aux_d(ih,ibnd_loc) = - et  (ibnd,ik) * aux_d(ih,ibnd_loc)
+#else
                       aux_d(ih,ibnd_loc) = - et_d(ibnd,ik) * aux_d(ih,ibnd_loc)
+#endif
                    END DO
                 END DO
 
                 ! add  \sum_j d_{ij} <beta_j|psi>
+#if defined(__OPENMP_GPU)
+                associate(r => becp%r)
+                   !$omp target variant dispatch use_device_ptr(deeq, r, aux_d)
+                   CALL DGEMM ('N','N', nh(nt), becp%nbnd_loc, nh(nt), &
+                        1.0_dp, deeq(1,1,na,current_spin), nhm, &
+                        r(ijkb0+1,1), nkb, 1.0_dp, aux_d, nh(nt) )
+                   !$omp end target variant dispatch
+                endassociate
+#else
                 CALL DGEMM ('N','N', nh(nt), becp_d%nbnd_loc, nh(nt), &
                      1.0_dp, deeq_d(1,1,na,current_spin), nhm, &
                      becp_d%r_d(ijkb0+1,1), nkb, 1.0_dp, aux_d, nh(nt) )
+#endif
 
                 ! Auxiliary variable to perform the reduction with cuf kernels
                 forcenl_ipol = 0.0_dp
 !$cuf kernel do(2)
+!$omp target teams distribute parallel do collapse(2)
                 DO ih = 1, nh_nt
                    DO ibnd_loc = 1, becp_d_nbnd_loc
                       ibnd = ibnd_loc + becp_d_ibnd_begin - 1
                       forcenl_ipol = forcenl_ipol - &
                            2.0_dp * tpiba * aux_d(ih,ibnd_loc) * &
+#if defined(__OPENMP_GPU)
+                           dbecp%r(ijkb0+ih,ibnd_loc) * wg(ibnd,ik)
+#else
                            dbecp_d_r_d(ijkb0+ih,ibnd_loc) * wg_d(ibnd,ik)
+#endif
                    ENDDO
                 ENDDO
                 forcenl(ipol,na) = forcenl(ipol,na) + forcenl_ipol
@@ -267,7 +348,7 @@ SUBROUTINE force_us_gpu( forcenl )
 #endif
        !
      END SUBROUTINE force_us_gamma_gpu
-     !     
+     !
      !-----------------------------------------------------------------------
      SUBROUTINE force_us_k_gpu( forcenl )
        !-----------------------------------------------------------------------
@@ -282,7 +363,7 @@ SUBROUTINE force_us_gpu( forcenl )
        !
        REAL(DP) :: fac
        INTEGER  :: ibnd, ih, jh, na, nt, ikb, jkb, ijkb0, is, js, ijs !counters
-#if defined(__CUDA)
+#if defined(__CUDA) || defined(__OPENMP_GPU)
        !
        CALL using_et(0)
        CALL using_becp_auto(0);
@@ -327,8 +408,8 @@ SUBROUTINE force_us_gpu( forcenl )
                       DO ih = 1, nh(nt)
                          ikb = ijkb0 + ih
                          !
-                         ! ... in US case there is a contribution for jh<>ih. 
-                         ! ... We use here the symmetry in the interchange 
+                         ! ... in US case there is a contribution for jh<>ih.
+                         ! ... We use here the symmetry in the interchange
                          ! ... of ih and jh
                          !
                          DO jh = ( ih + 1 ), nh(nt)
