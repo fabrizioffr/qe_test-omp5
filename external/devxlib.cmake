@@ -21,7 +21,7 @@ if(DEVXLIB_ROOT)
         PATH_SUFFIXES "include" "mod" "src")
 
     if(NOT DEVXLIB_MOD_PATH)
-        message(FATAL_ERROR "Failed in locating device_fbuff_m.mod file at ${DEVXLIB_ROOT}/(include.mod,src)")
+        message(FATAL_ERROR "Failed in locating devixlib.mod file at ${DEVXLIB_ROOT}/(include.mod,src)")
     endif()
 
     target_link_libraries(qe_devxlib PUBLIC INTERFACE ${DEVXLIB_LIB})
