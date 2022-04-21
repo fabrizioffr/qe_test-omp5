@@ -22,7 +22,13 @@ MODULE becmod_subs_gpum
   USE control_flags,    ONLY : gamma_only, smallmem
   USE gvect,            ONLY : gstart
   USE noncollin_module, ONLY : noncolin, npol
+#if !defined(__OPENMP_GPU)
   USE becmod_gpum,      ONLY : bec_type_d
+#else
+  USE omp_lib
+  USE becmod,           ONLY : bec_type
+  USE dmr,              ONLY : omp_target_is_present_f
+#endif
   !
   SAVE
   !
@@ -41,7 +47,7 @@ MODULE becmod_subs_gpum
   END INTERFACE
   !
   PUBLIC :: allocate_bec_type_gpu, deallocate_bec_type_gpu, calbec_gpu, &
-            beccopy_gpu, becscal_gpu, is_allocated_bec_type_gpu, &
+            beccopy_gpu, becscal_gpu, &!is_allocated_bec_type_gpu, &
             synchronize_bec_type_gpu, &
             using_becp_auto, using_becp_d_auto
   !
@@ -56,8 +62,13 @@ CONTAINS
     !
     IMPLICIT NONE
     COMPLEX (DP), INTENT (in) :: beta_d(:,:), psi_d(:,:)
+#if !defined(__OPENMP_GPU)
     TYPE (bec_type_d), TARGET, INTENT (inout) :: betapsi_d ! NB: must be INOUT otherwise
                                                !  the allocatd array is lost
+#else
+    TYPE (bec_type), TARGET, INTENT (inout) :: betapsi_d ! NB: must be INOUT otherwise
+                                               !  the allocatd array is lost
+#endif
     INTEGER, INTENT (in) :: npw
     INTEGER, OPTIONAL :: nbnd
 #if defined(__CUDA)
@@ -68,8 +79,11 @@ CONTAINS
     INTEGER :: m_loc, m_begin, ip
     REAL(DP), ALLOCATABLE :: dtmp_d(:,:)   ! replace this with buffers !
     INTEGER :: i, j, nkb
-    REAL(DP), POINTER :: betapsi_d_r_d(:,:)
+#if defined(__OPENMP_GPU)
+    INTEGER :: omp_device
+#endif
 #if defined(__CUDA)
+    REAL(DP), POINTER :: betapsi_d_r_d(:,:)
     attributes(DEVICE) :: dtmp_d, betapsi_d_r_d
 #endif
     !
@@ -83,11 +97,23 @@ CONTAINS
        !
        IF( betapsi_d%comm == mp_get_comm_null() ) THEN
           !
+#if defined(__CUDA)
           CALL calbec_gamma_gpu ( npw, beta_d, psi_d, betapsi_d%r_d, local_nbnd, intra_bgrp_comm )
+#elif defined(__OPENMP_GPU)
+          CALL calbec_gamma_gpu ( npw, beta_d, psi_d, betapsi_d%r, local_nbnd, intra_bgrp_comm )
+#endif
           !
        ELSE
           !
+#if defined(__CUDA)
           ALLOCATE( dtmp_d( SIZE( betapsi_d%r_d, 1 ), SIZE( betapsi_d%r_d, 2 ) ) )
+#elif defined(__OPENMP_GPU)
+          !omp_device = call omp_get_default_device()
+          !call omp_target_alloc_f(fptr_dev=dtmp_d, dimensions=[SIZE( betapsi_d%r, 1 ), SIZE( betapsi_d%r, 2 )], &
+          !                        omp_dev=omp_device)
+          !$omp allocate allocator(omp_target_device_mem_alloc)
+          ALLOCATE( dtmp_d( SIZE( betapsi_d%r, 1 ), SIZE( betapsi_d%r, 2 ) ) )
+#endif
           !
           DO ip = 0, betapsi_d%nproc - 1
              m_loc   = ldim_block( betapsi_d%nbnd , betapsi_d%nproc, ip )
@@ -96,6 +122,7 @@ CONTAINS
              IF( m_loc > 0 ) THEN
                 CALL calbec_gamma_gpu ( npw, beta_d, psi_d(:,m_begin:m_begin+m_loc-1), dtmp_d, m_loc, betapsi_d%comm )
                 IF( ip == betapsi_d%mype ) THEN
+#if defined(__CUDA)
                    nkb = SIZE( betapsi_d%r_d, 1 )
                    betapsi_d_r_d => betapsi_d%r_d
 !$cuf kernel do(2) <<<*,*>>>
@@ -104,21 +131,44 @@ CONTAINS
                          betapsi_d_r_d(i,j) = dtmp_d(i,j)
                       END DO
                    END DO
+#elif defined(__OPENMP_GPU)
+                   nkb = SIZE( betapsi_d%r, 1 )
+                   !$omp target teams distribute parallel do collapse(2)
+                   DO j=1,m_loc
+                      DO i=1, nkb
+                         betapsi_d%r(i,j) = dtmp_d(i,j)
+                      END DO
+                   END DO
+                   !$omp end target teams distribute parallel do
+#endif
                 END IF
              END IF
           END DO
 
+#if defined(__CUDA)
           DEALLOCATE( dtmp_d )
+#elif defined(__OPENMP_GPU)
+          !call omp_target_free_f(fptr_dev=dtmp_d, omp_dev=omp_device)
+          DEALLOCATE( dtmp_d )
+#endif
           !
        END IF
        !
     ELSEIF ( noncolin) THEN
        !
+#if defined(__CUDA)
        CALL  calbec_nc_gpu ( npw, beta_d, psi_d, betapsi_d%nc_d, local_nbnd )
+#elif defined(__OPENMP_GPU)
+       CALL  calbec_nc_gpu ( npw, beta_d, psi_d, betapsi_d%nc, local_nbnd )
+#endif
        !
     ELSE
        !
+#if defined(__CUDA)
        CALL  calbec_k_gpu ( npw, beta_d, psi_d, betapsi_d%k_d, local_nbnd )
+#elif defined(__OPENMP_GPU)
+       CALL  calbec_k_gpu ( npw, beta_d, psi_d, betapsi_d%k, local_nbnd )
+#endif
        !
     ENDIF
     !
@@ -159,7 +209,10 @@ CONTAINS
 #if defined(__CUDA)
     USE cudafor
     USE cublas
+#elif defined(__OPENMP_GPU)
+    USE onemkl_blas_omp_offload_no_array_check
 #endif
+    USE devXlib, ONLY : devxlib_memory_set
     IMPLICIT NONE
     COMPLEX (DP), INTENT (in) :: beta_d(:,:), psi_d(:,:)
     REAL (DP), INTENT (out) :: betapsi_d(:,:)
@@ -179,7 +232,7 @@ CONTAINS
     IF ( nkb == 0 ) RETURN
     !
     CALL start_clock( 'calbec' )
-    IF ( npw == 0 ) betapsi_d(:,:)=0.0_DP
+    IF ( npw == 0 ) call devxlib_memory_set(betapsi_d, 0.0_DP)
     npwx= size (beta_d, 1)
     IF ( npwx /= size (psi_d, 1) ) CALL errore ('calbec', 'size mismatch', 1)
     IF ( npwx < npw ) CALL errore ('calbec', 'size mismatch', 2)
@@ -192,26 +245,47 @@ CONTAINS
     !
     IF ( m == 1 ) THEN
         !
+#if !defined(__OPENMP_GPU)
         CALL cudaDGEMV( 'C', 2*npw, nkb, 2.0_DP, beta_d, 2*npwx, psi_d, 1, 0.0_DP, &
                      betapsi_d, 1 )
+#else
+        !$omp target variant dispatch use_device_ptr(beta_d, psi_d, betapsi_d)
+        CALL DGEMV( 'C', 2*npw, nkb, 2.0_DP, beta_d, 2*npwx, psi_d, 1, 0.0_DP, &
+                     betapsi_d, 1 )
+        !$omp end target variant dispatch
+#endif
         IF ( gstart == 2 ) THEN
            !betapsi_d(:,1) = betapsi_d(:,1) - beta_d(1,:)*psi_d(1,1)
            !$cuf kernel do(1) <<<*,*>>>
+           !$omp target teams distribute parallel do is_device_ptr(betapsi_d,beta_d, psi_d)
            DO i=1, nkb
               betapsi_d(i,1) = betapsi_d(i,1) - DBLE(beta_d(1,i)*psi_d(1,1))
            END DO
+           !$omp end target teams distribute parallel do
         END IF
         !
     ELSE
         !
+        !$omp target variant dispatch use_device_ptr(beta_d, psi_d, betapsi_d)
         CALL DGEMM( 'C', 'N', nkb, m, 2*npw, 2.0_DP, beta_d, 2*npwx, psi_d, &
                     2*npwx, 0.0_DP, betapsi_d, nkb )
-        IF ( gstart == 2 ) &
+        !$omp end target variant dispatch
+        IF ( gstart == 2 ) THEN
+#if !defined(__OPENMP_GPU)
            CALL cudaDGER( nkb, m, -1.0_DP, beta_d, 2*npwx, psi_d, 2*npwx, betapsi_d, nkb )
+#else
+           !$omp target variant dispatch use_device_ptr(beta_d, psi_d, betapsi_d)
+           CALL DGER( nkb, m, -1.0_DP, beta_d, 2*npwx, psi_d, 2*npwx, betapsi_d, nkb )
+           !$omp end target variant dispatch
+#endif
+        ENDIF
         !
     ENDIF
     !
-    IF (mp_size(comm) > 1) CALL mp_sum( betapsi_d( :, 1:m ), comm )
+    IF (mp_size(comm) > 1) THEN
+       !$omp dispatch is_device_ptr(betapsi_d)
+       CALL mp_sum( betapsi_d( :, 1:m ), comm )
+    ENDIF
     !
     CALL stop_clock( 'calbec' )
     !
@@ -231,7 +305,10 @@ CONTAINS
 #if defined(__CUDA)
     USE cudafor
     USE cublas
+#elif defined(__OPENMP_GPU)
+    USE onemkl_blas_omp_offload
 #endif
+    USE devXlib, ONLY : devxlib_memory_set
     IMPLICIT NONE
     COMPLEX (DP), INTENT (in) :: beta_d(:,:), psi_d(:,:)
     COMPLEX (DP), INTENT (out) :: betapsi_d(:,:)
@@ -247,7 +324,7 @@ CONTAINS
     IF ( nkb == 0 ) RETURN
     !
     CALL start_clock( 'calbec' )
-    IF ( npw == 0 ) betapsi_d(:,:)=(0.0_DP,0.0_DP)
+    IF ( npw == 0 ) call devxlib_memory_set(betapsi_d, (0.0_DP,0.0_DP))
     npwx= size (beta_d, 1)
     IF ( npwx /= size (psi_d, 1) ) CALL errore ('calbec', 'size mismatch', 1)
     IF ( npwx < npw ) CALL errore ('calbec', 'size mismatch', 2)
@@ -265,17 +342,24 @@ CONTAINS
     !
     IF ( m == 1 ) THEN
        !
+       !$omp target variant dispatch use_device_ptr(beta_d, psi_d, betapsi_d)
        CALL ZGEMV( 'C', npw, nkb, (1.0_DP,0.0_DP), beta_d, npwx, psi_d, 1, &
                    (0.0_DP, 0.0_DP), betapsi_d, 1 )
+       !$omp end target variant dispatch
        !
     ELSE
        !
+       !$omp target variant dispatch use_device_ptr(beta_d, psi_d, betapsi_d)
        CALL ZGEMM( 'C', 'N', nkb, m, npw, (1.0_DP,0.0_DP), &
                  beta_d, npwx, psi_d, npwx, (0.0_DP,0.0_DP), betapsi_d, nkb )
+       !$omp end target variant dispatch
        !
     ENDIF
     !
-    IF (mp_size(intra_bgrp_comm) > 1) CALL mp_sum( betapsi_d( :, 1:m ), intra_bgrp_comm )
+    IF (mp_size(intra_bgrp_comm) > 1) THEN
+       !$omp dispatch is_device_ptr(betapsi_d)
+       CALL mp_sum( betapsi_d( :, 1:m ), intra_bgrp_comm )
+    ENDIF
     !
     CALL stop_clock( 'calbec' )
     !
@@ -297,7 +381,10 @@ CONTAINS
 #if defined(__CUDA)
     USE cudafor
     USE cublas
+#elif defined(__OPENMP_GPU)
+    USE onemkl_blas_omp_offload
 #endif
+    USE devXlib, ONLY : devxlib_memory_set
     IMPLICIT NONE
     COMPLEX (DP), INTENT (in) :: beta_d(:,:), psi_d(:,:)
     COMPLEX (DP), INTENT (out) :: betapsi_d(:,:,:)
@@ -313,7 +400,7 @@ CONTAINS
     IF ( nkb == 0 ) RETURN
     !
     CALL start_clock ('calbec')
-    IF ( npw == 0 ) betapsi_d(:,:,:)=(0.0_DP,0.0_DP)
+    IF ( npw == 0 ) call devxlib_memory_set(betapsi_d, (0.0_DP,0.0_DP))
     npwx= size (beta_d, 1)
     IF ( 2*npwx /= size (psi_d, 1) ) CALL errore ('calbec', 'size mismatch', 1)
     IF ( npwx < npw ) CALL errore ('calbec', 'size mismatch', 2)
@@ -330,10 +417,15 @@ CONTAINS
     IF ( nkb /= size (betapsi_d,1) .or. m > size (betapsi_d, 3) ) &
       CALL errore ('calbec', 'size mismatch', 3)
     !
+    !$omp target variant dispatch use_device_ptr(beta_d, psi_d, betapsi_d)
     CALL ZGEMM ('C', 'N', nkb, m*npol, npw, (1.0_DP, 0.0_DP), beta_d, &
               npwx, psi_d, npwx, (0.0_DP, 0.0_DP),  betapsi_d, nkb)
+    !$omp end target variant dispatch
     !
-    IF (mp_size(intra_bgrp_comm) > 1)  CALL mp_sum( betapsi_d( :, :, 1:m ), intra_bgrp_comm )
+    IF (mp_size(intra_bgrp_comm) > 1)  THEN
+       !$omp dispatch is_device_ptr(betapsi_d)
+       CALL mp_sum( betapsi_d( :, :, 1:m ), intra_bgrp_comm )
+    ENDIF
     !
     CALL stop_clock( 'calbec' )
     !
@@ -343,16 +435,26 @@ CONTAINS
   !
   !
   !-----------------------------------------------------------------------
-  FUNCTION is_allocated_bec_type_gpu (bec_d) RESULT (isalloc)
-    !-----------------------------------------------------------------------
-    IMPLICIT NONE
-    TYPE (bec_type_d) :: bec_d
-    LOGICAL :: isalloc
-    isalloc = (allocated(bec_d%r_d) .or. allocated(bec_d%nc_d) .or. allocated(bec_d%k_d))
-    RETURN
-    !
-    !-----------------------------------------------------------------------
-  END FUNCTION is_allocated_bec_type_gpu
+!  FUNCTION is_allocated_bec_type_gpu (bec_d) RESULT (isalloc)
+!    !-----------------------------------------------------------------------
+!    IMPLICIT NONE
+!#if !defined(__OPENMP_GPU)
+!    TYPE (bec_type_d) :: bec_d
+!#else
+!    TYPE (bec_type) :: bec_d
+!#endif
+!    LOGICAL :: isalloc
+!#if defined(__CUDA)
+!    isalloc = (allocated(bec_d%r_d) .or. allocated(bec_d%nc_d) .or. allocated(bec_d%k_d))
+!#elif defined(__OPENMP_GPU)
+!    isalloc = (omp_target_is_present_f(fptr_dev=bec_d%r,  omp_dev=omp_get_default_device()) .or. &
+!               omp_target_is_present_f(fptr_dev=bec_d%nc, omp_dev=omp_get_default_device()) .or. &
+!               omp_target_is_present_f(fptr_dev=bec_d%k,  omp_dev=omp_get_default_device()))
+!#endif
+!    RETURN
+!    !
+!    !-----------------------------------------------------------------------
+!  END FUNCTION is_allocated_bec_type_gpu
   !-----------------------------------------------------------------------
   !
   !-----------------------------------------------------------------------
@@ -360,14 +462,27 @@ CONTAINS
     !-----------------------------------------------------------------------
     USE mp, ONLY: mp_size, mp_rank, mp_get_comm_null
     USE distools, ONLY : ldim_block, gind_block
-    USE devxlib_memset, ONLY : dev_memset=>devxlib_memory_set
+    USE devXlib, ONLY : devxlib_memory_set
     IMPLICIT NONE
+#if !defined(__OPENMP_GPU)
     TYPE (bec_type_d) :: bec_d
+#else
+    TYPE (bec_type) :: bec_d
+#endif
     INTEGER, INTENT (in) :: nkb, nbnd
     INTEGER, INTENT (in), OPTIONAL :: comm
     INTEGER :: ierr, nbnd_siz
+#if defined(__OPENMP_GPU)
+    INTEGER :: omp_device
+#endif
     !
+#if defined(__OPENMP_GPU)
+    !$omp target update to(bec_d%comm, bec_d%nbnd, bec_d%nproc, bec_d%mype, &
+    !$omp&                 bec_d%nbnd_loc, bec_d%ibnd_begin)
+    omp_device = omp_get_default_device()
+#else
     nbnd_siz = nbnd
+    !$omp target
     bec_d%comm = mp_get_comm_null()
     bec_d%nbnd = nbnd
     bec_d%mype = 0
@@ -386,30 +501,55 @@ CONTAINS
           bec_d%ibnd_begin = gind_block( 1,  bec_d%nbnd, bec_d%nproc, bec_d%mype )
        END IF
     END IF
+#endif
     !
     IF ( gamma_only ) THEN
        !
+#if defined(__CUDA)
        ALLOCATE( bec_d%r_d( nkb, nbnd_siz ), STAT=ierr )
+#elif defined(__OPENMP_GPU)
+       !$omp target enter data map(alloc:bec_d%r)
+#endif
        IF( ierr /= 0 ) &
           CALL errore( ' allocate_bec_type ', ' cannot allocate bec_d%r ', ABS(ierr) )
        !
-       CALL dev_memset(bec_d%r_d, 0.0D0, (/1,nkb/), 1, (/1, nbnd_siz/), 1)
+#if defined(__CUDA)
+       CALL devxlib_memory_set(bec_d%r_d, 0.0D0, (/1,nkb/), 1, (/1, nbnd_siz/), 1)
+#elif defined(__OPENMP_GPU)
+       CALL devxlib_memory_set(bec_d%r, 0.0D0, (/1,nkb/), 1, (/1, nbnd_siz/), 1)
+#endif
        !
     ELSEIF ( noncolin) THEN
        !
+#if defined(__CUDA)
        ALLOCATE( bec_d%nc_d( nkb, npol, nbnd_siz ), STAT=ierr )
+#elif defined(__OPENMP_GPU)
+       !$omp target enter data map(alloc:bec_d%nc)
+#endif
        IF( ierr /= 0 ) &
           CALL errore( ' allocate_bec_type ', ' cannot allocate bec_d%nc ', ABS(ierr) )
        !
-       CALL dev_memset(bec_d%nc_d, (0.0D0,0.0D0), (/1, nkb/), 1, (/1, npol/), 1, (/1, nbnd_siz/), 1)
+#if defined(__CUDA)
+       CALL devxlib_memory_set(bec_d%nc_d, (0.0D0,0.0D0), (/1, nkb/), 1, (/1, npol/), 1, (/1, nbnd_siz/), 1)
+#elif defined(__OPENMP_GPU)
+       CALL devxlib_memory_set(bec_d%nc, (0.0D0,0.0D0), (/1, nkb/), 1, (/1, npol/), 1, (/1, nbnd_siz/), 1)
+#endif
        !
     ELSE
        !
+#if defined(__CUDA)
        ALLOCATE( bec_d%k_d( nkb, nbnd_siz ), STAT=ierr )
+#elif defined(__OPENMP_GPU)
+       !$omp target enter data map(alloc:bec_d%k)
+#endif
        IF( ierr /= 0 ) &
           CALL errore( ' allocate_bec_type ', ' cannot allocate bec_d%k ', ABS(ierr) )
        !
-       CALL dev_memset(bec_d%k_d, (0.0D0,0.0D0), (/1, nkb/), 1, (/1, npol/), 1)
+#if defined(__CUDA)
+       CALL devxlib_memory_set(bec_d%k_d, (0.0D0,0.0D0), (/1, nkb/), 1, (/1, npol/), 1)
+#elif defined(__OPENMP_GPU)
+       CALL devxlib_memory_set(bec_d%k, (0.0D0,0.0D0), (/1, nkb/), 1, (/1, npol/), 1)
+#endif
        !
     ENDIF
     !
@@ -424,14 +564,29 @@ CONTAINS
     !
     USE mp, ONLY: mp_get_comm_null
     IMPLICIT NONE
+#if defined(__OPENMP_GPU)
+    TYPE (bec_type) :: bec_d
+    INTEGER :: omp_device
+#else
     TYPE (bec_type_d) :: bec_d
+#endif
     !
+#if defined(__OPENMP_GPU)
+    omp_device = omp_get_default_device()
+#endif
+    !
+#if !defined(__OPENMP_GPU)
     bec_d%comm = mp_get_comm_null()
     bec_d%nbnd = 0
     !
     IF (allocated(bec_d%r_d))  DEALLOCATE(bec_d%r_d)
     IF (allocated(bec_d%nc_d)) DEALLOCATE(bec_d%nc_d)
     IF (allocated(bec_d%k_d))  DEALLOCATE(bec_d%k_d)
+#else
+    !$omp target exit data map(delete:bec_d%r)
+    !$omp target exit data map(delete:bec_d%nc)
+    !$omp target exit data map(delete:bec_d%k)
+#endif
     !
     RETURN
     !
@@ -439,7 +594,11 @@ CONTAINS
   !-----------------------------------------------------------------------
   !
   !-----------------------------------------------------------------------
+#if !defined(__OPENMP_GPU)
   SUBROUTINE 	synchronize_bec_type_gpu (bec_d, bec, what)
+#else
+  SUBROUTINE synchronize_bec_type_gpu (bec, what)
+#endif
     !-----------------------------------------------------------------------
     !
     ! ... Updates a device or host version of a bec_type variable.
@@ -449,10 +608,13 @@ CONTAINS
     USE mp, ONLY: mp_get_comm_null
     USE becmod, ONLY : bec_type
     IMPLICIT NONE
+#if !defined(__OPENMP_GPU)
     TYPE (bec_type_d) :: bec_d
+#endif
     TYPE (bec_type) :: bec
     CHARACTER, INTENT(IN) :: what
     !
+#if !defined(__OPENMP_GPU)
     IF ( gamma_only ) THEN
        !
        IF (.not. (allocated(bec_d%r_d) .and. allocated(bec%r))) &
@@ -493,6 +655,42 @@ CONTAINS
        END SELECT
        !
     ENDIF
+#else
+    IF ( gamma_only ) THEN
+       !
+       SELECT CASE(what)
+        CASE('d')
+          !$omp target update to(bec%r)
+        CASE('h')
+          !$omp target update from(bec%r)
+        CASE DEFAULT
+          CALL errore('becmod_gpu', 'Invalid command',2)
+       END SELECT
+       !
+    ELSEIF ( noncolin) THEN
+       !
+       SELECT CASE(what)
+        CASE('d')
+          !$omp target update to(bec%nc)
+        CASE('h')
+          !$omp target update from(bec%nc)
+        CASE DEFAULT
+          CALL errore('becmod_gpu', 'Invalid command',4)
+       END SELECT
+       !
+    ELSE
+       !
+       SELECT CASE(what)
+        CASE('d')
+          !$omp target update to(bec%k)
+        CASE('h')
+          !$omp target update from(bec%k)
+        CASE DEFAULT
+          CALL errore('becmod_gpu', 'Invalid command',6)
+       END SELECT
+       !
+    ENDIF
+#endif
     !
     RETURN
     !
@@ -504,18 +702,49 @@ CONTAINS
 #if defined(__CUDA)
     USE cudafor
     USE cublas
+#elif defined (__OPENMP_GPU)
+    USE onemkl_blas_omp_offload
 #endif
     IMPLICIT NONE
+#if !defined(__OPENMP_GPU)
     TYPE(bec_type_d), INTENT(in) :: bec
     TYPE(bec_type_d)  :: bec1
+#else
+    TYPE(bec_type) :: bec
+    TYPE(bec_type) :: bec1
+#endif
     INTEGER, INTENT(in) :: nkb, nbnd
 
     IF (gamma_only) THEN
+#if !defined(__OPENMP_GPU)
        CALL dcopy(nkb*nbnd, bec%r_d, 1, bec1%r_d, 1)
+#else
+       associate(r => bec%r, r1 => bec1%r)
+          !$omp target variant dispatch use_device_ptr(r, r1)
+          CALL dcopy(nkb*nbnd, r, 1, r1, 1)
+          !$omp end target variant dispatch
+       endassociate
+#endif
     ELSEIF (noncolin) THEN
+#if !defined(__OPENMP_GPU)
        CALL zcopy(nkb*npol*nbnd, bec%nc_d, 1, bec1%nc_d,  1)
+#else
+       associate(nc => bec%nc, nc1 => bec1%nc)
+          !$omp target variant dispatch use_device_ptr(nc, nc1)
+          CALL zcopy(nkb*npol*nbnd, nc, 1, nc1, 1)
+          !$omp end target variant dispatch
+       endassociate
+#endif
     ELSE
+#if !defined(__OPENMP_GPU)
        CALL zcopy(nkb*nbnd, bec%k_d, 1, bec1%k_d, 1)
+#else
+       associate(k => bec%k, k1 => bec1%k)
+          !$omp target variant dispatch use_device_ptr(k, k1)
+          CALL zcopy(nkb*nbnd, k, 1, k1, 1)
+          !$omp end target variant dispatch
+       endassociate
+#endif
     ENDIF
 
     RETURN
@@ -525,17 +754,39 @@ CONTAINS
 #if defined(__CUDA)
     USE cudafor
     USE cublas
+#elif defined (__OPENMP_GPU)
+    USE onemkl_blas_omp_offload
 #endif
     IMPLICIT NONE
+#if !defined(__OPENMP_GPU)
     TYPE(bec_type_d), INTENT(INOUT) :: bec_d
+#else
+    TYPE(bec_type), INTENT(inout) :: bec_d
+#endif
     COMPLEX(DP), INTENT(IN) :: alpha
     INTEGER, INTENT(IN) :: nkb, nbnd
     IF (gamma_only) THEN
        CALL errore('becscal_nck','called in the wrong case',1)
     ELSEIF (noncolin) THEN
+#if !defined(__OPENMP_GPU)
        CALL zscal(nkb*npol*nbnd, alpha, bec_d%nc_d, 1)
+#else
+       associate(nc => bec_d%nc)
+          !$omp target variant dispatch use_device_ptr(nc)
+          CALL zscal(nkb*npol*nbnd, alpha, nc, 1)
+          !$omp end target variant dispatch
+       endassociate
+#endif
     ELSE
+#if !defined(__OPENMP_GPU)
        CALL zscal(nkb*nbnd, alpha, bec_d%k_d, 1)
+#else
+       associate(k => bec_d%k)
+          !$omp target variant dispatch use_device_ptr(k)
+          CALL zscal(nkb*nbnd, alpha, k, 1)
+          !$omp end target variant dispatch
+       endassociate
+#endif
     ENDIF
 
     RETURN
@@ -545,14 +796,28 @@ CONTAINS
 #if defined(__CUDA)
     USE cudafor
     USE cublas
+#elif defined (__OPENMP_GPU)
+    USE onemkl_blas_omp_offload
 #endif
     IMPLICIT NONE
+#if !defined(__OPENMP_GPU)
     TYPE(bec_type_d), INTENT(INOUT) :: bec_d
+#else
+    TYPE(bec_type), INTENT(INOUT) :: bec_d
+#endif
     REAL(DP), INTENT(IN) :: alpha
     INTEGER, INTENT(IN) :: nkb, nbnd
 
     IF (gamma_only) THEN
+#if !defined(__OPENMP_GPU)
        CALL dscal(nkb*nbnd, alpha, bec_d%r_d, 1)
+#else
+       associate(r => bec_d%r)
+          !$omp target variant dispatch use_device_ptr(r)
+          CALL dscal(nkb*nbnd, alpha, r, 1)
+          !$omp end target variant dispatch
+       endassociate
+#endif
     ELSE
        CALL errore('becscal_gamma','called in the wrong case',1)
     ENDIF

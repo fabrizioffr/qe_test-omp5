@@ -43,7 +43,7 @@ set(src_modules
     mp_wave.f90 
     mp_world.f90 
     noncol.f90 
-    onemkl_gpu.f90
+    onemkl_blas_omp_offload.f90
     open_close_input_file.f90 
     parameters.f90 
     parser.f90 
