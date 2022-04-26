@@ -66,7 +66,7 @@ include(GNUInstallDirs)
 include(CMakeDependentOption)
 option(QE_ENABLE_CUDA
     "enable CUDA acceleration on NVIDIA GPUs" OFF)
- option(QE_ENABLE_OPENMP_OFFLOAD
+option(QE_ENABLE_OPENMP_OFFLOAD
     "enable OpenMP offload on GPUs" OFF)
 if((QE_ENABLE_CUDA) AND (QE_ENABLE_OPENMP_OFFLOAD))
     message(FATAL_ERROR "CUDA and OpenMP offload cannot be enabled both at the same time")
@@ -78,12 +78,15 @@ if(QE_ENABLE_CUDA)
         "enable distributed execution support via OpenMP" ON)
 else()
     option(QE_ENABLE_OPENACC "enable OpenACC acceleration" OFF)
-    option(QE_ENABLE_OPENMP
-        "enable distributed execution support via OpenMP" OFF)
-endif()
-if(QE_ENABLE_OPENMP_OFFLOAD)
-    option(QE_ENABLE_OPENMP
-        "enable distributed execution support via OpenMP" ON)
+    if(QE_ENABLE_OPENMP_OFFLOAD)
+        option(QE_ENABLE_OPENMP
+            "enable distributed execution support via OpenMP" ON)
+        message(STATUS "-----------Dovrebbe essere settata-----------")
+        message(STATUS "QE_ENABLE_OPENMP is ${QE_ENABLE_OPENMP}")
+    else()
+        option(QE_ENABLE_OPENMP
+            "enable distributed execution support via OpenMP" OFF)
+    endif()
 endif()
 option(QE_ENABLE_MPI
     "enable distributed execution support via MPI" ON)
