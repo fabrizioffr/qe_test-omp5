@@ -81,8 +81,6 @@ else()
     if(QE_ENABLE_OPENMP_OFFLOAD)
         option(QE_ENABLE_OPENMP
             "enable distributed execution support via OpenMP" ON)
-        message(STATUS "-----------Dovrebbe essere settata-----------")
-        message(STATUS "QE_ENABLE_OPENMP is ${QE_ENABLE_OPENMP}")
     else()
         option(QE_ENABLE_OPENMP
             "enable distributed execution support via OpenMP" OFF)
