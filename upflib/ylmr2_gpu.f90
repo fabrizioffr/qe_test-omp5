@@ -5,9 +5,11 @@
 ! in the root directory of the present distribution,
 ! or http://www.gnu.org/copyleft/gpl.txt .
 !
+#if !defined(__OPENMP_GPU)
 #define __PGI_1910_WORKAROUND
 ! use the CUDA Kernel version instead of the simple  CUF version
 ! that for some obscure reason crashes on (obsolescent) PGI v.19.10
+#endif
 
 module ylmr2_gpum
 #if defined(__CUDA) && defined(__PGI_1910_WORKAROUND)
@@ -117,8 +119,8 @@ subroutine ylmr2_gpu(lmax2, ng, g, gg, ylm)
   !
   !     Real spherical harmonics ylm(G) up to l=lmax, GPU version
   !     lmax2 = (lmax+1)^2 is the total number of spherical harmonics
-  !     Numerical recursive algorithm based on the one given in Numerical 
-  !     Recipes but avoiding the calculation of factorials that generate 
+  !     Numerical recursive algorithm based on the one given in Numerical
+  !     Recipes but avoiding the calculation of factorials that generate
   !     overflow for lmax > 11
   !     Last modified May 2nd, 2021, by PG
   !
@@ -166,7 +168,7 @@ subroutine ylmr2_gpu(lmax2, ng, g, gg, ylm)
   real(DP), intent(in) :: g (3, ng), gg (ng)
   !
   ! BEWARE: gg = g(1)^2 + g(2)^2 +g(3)^2  is not checked on input
-  ! Incorrect results will ensue if gg != g(1)^2 + g(2)^2 +g(3)^2 
+  ! Incorrect results will ensue if gg != g(1)^2 + g(2)^2 +g(3)^2
   !
   real(DP), intent(out) :: ylm (ng,lmax2)
 #if defined(__CUDA)
@@ -176,7 +178,7 @@ subroutine ylmr2_gpu(lmax2, ng, g, gg, ylm)
   ! local variables
   !
   real(DP), parameter :: eps = 1.0d-9
-  real(DP) :: cost , sent, phi 
+  real(DP) :: cost , sent, phi
   real(DP) :: c, gmod
   integer :: lmax, ig, l, m, lm, lm1, lm2
   !
@@ -189,6 +191,7 @@ subroutine ylmr2_gpu(lmax2, ng, g, gg, ylm)
   !
   if (lmax == 0) then
      !$cuf kernel do
+     !$omp target teams distribute parallel do
      do ig=1, ng
         ylm(ig,1) =  sqrt (1.d0 / fpi)
      end do
@@ -196,6 +199,7 @@ subroutine ylmr2_gpu(lmax2, ng, g, gg, ylm)
   end if
   !
 !$cuf kernel do
+!$omp target teams distribute parallel do
    do ig=1,ng
      gmod = sqrt (gg (ig) )
      if (gmod < eps) then
@@ -230,7 +234,7 @@ subroutine ylmr2_gpu(lmax2, ng, g, gg, ylm)
         lm1= (l  )**2 + 1 + 2*(l-1)
         lm2= (l-1)**2 + 1 + 2*(l-1)
         ylm(ig,lm1) = cost * sqrt(DBLE(2*l-1)) * ylm(ig,lm2)
-        ylm(ig,lm ) = - sqrt(DBLE(2*l-1))/sqrt(DBLE(2*l))*sent*ylm(ig,lm2) 
+        ylm(ig,lm ) = - sqrt(DBLE(2*l-1))/sqrt(DBLE(2*l))*sent*ylm(ig,lm2)
         !
      end do
      !

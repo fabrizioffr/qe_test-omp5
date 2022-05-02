@@ -13,6 +13,9 @@ SUBROUTINE dylmr2_gpu( nylm, ngy, g_d, gg_d, dylm_d, ipol )
   !! The spherical harmonics are calculated in ylmr2.
   !
   USE upf_kinds, ONLY : DP
+#if defined(__OPENMP_GPU)
+  USE omp_lib
+#endif
   !
   IMPLICIT NONE
   !
@@ -49,14 +52,17 @@ SUBROUTINE dylmr2_gpu( nylm, ngy, g_d, gg_d, dylm_d, ipol )
 #if defined(__CUDA)
   attributes(DEVICE) :: g_d, gg_d, dylm_d, gx_d, ggx_d, dg_d, &
                         dgi_d, ylmaux_d
-#endif  
+#endif
   !
-  
+
   !
+  !$omp allocate allocator(omp_target_device_mem_alloc)
   ALLOCATE( gx_d(3,ngy), ggx_d(ngy), dg_d(ngy) )
+  !$omp allocate allocator(omp_target_device_mem_alloc)
   ALLOCATE( dgi_d(ngy), ylmaux_d(ngy,nylm) )
 
   !$cuf kernel do (1) <<<*,*>>>
+  !$omp target teams distribute parallel do
   DO ig = 1, ngy
      dg_d(ig) = delta * SQRT(gg_d(ig) )
      IF (gg_d(ig) > 1.E-9_DP) THEN
@@ -75,6 +81,7 @@ SUBROUTINE dylmr2_gpu( nylm, ngy, g_d, gg_d, dylm_d, ipol )
   ENDIF
   !
   !$cuf kernel do (1) <<<*,*>>>
+  !$omp target teams distribute parallel do
   DO ig = 1, ngy
      gx_d(apol,ig) = g_d(apol,ig)
      gx_d(bpol,ig) = g_d(bpol,ig)
@@ -87,6 +94,7 @@ SUBROUTINE dylmr2_gpu( nylm, ngy, g_d, gg_d, dylm_d, ipol )
   CALL ylmr2_gpu( nylm, ngy, gx_d, ggx_d, dylm_d )
   !
   !$cuf kernel do (1) <<<*,*>>>
+  !$omp target teams distribute parallel do
   DO ig = 1, ngy
      gx_d(ipol,ig) = g_d(ipol,ig) - dg_d(ig)
      ggx_d(ig) = gx_d(1,ig) * gx_d(1,ig) + &
@@ -97,6 +105,7 @@ SUBROUTINE dylmr2_gpu( nylm, ngy, g_d, gg_d, dylm_d, ipol )
   CALL ylmr2_gpu( nylm, ngy, gx_d, ggx_d, ylmaux_d )
   !
   !$cuf kernel do (2) <<<*,*>>>
+  !$omp target teams distribute parallel do collapse(2)
   DO lm = 1, nylm
      DO ig = 1, ngy
         dylm_d(ig,lm) = (dylm_d(ig,lm)-ylmaux_d(ig,lm)) * 0.5_DP * dgi_d(ig)

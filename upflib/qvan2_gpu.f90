@@ -14,7 +14,7 @@ attributes(global) subroutine qvan2_kernel(ngy, ih, jh, np, qmod_d, qg_d, ylmk0_
    !-----------------------------------------------------------------------
    !
    !    This routine computes the fourier transform of the Q functions
-   !    The interpolation table for the radial fourier trasform is stored 
+   !    The interpolation table for the radial fourier trasform is stored
    !    in qrad.
    !
    !    The formula implemented here is
@@ -48,7 +48,7 @@ attributes(global) subroutine qvan2_kernel(ngy, ih, jh, np, qmod_d, qg_d, ylmk0_
    !     here the local variables
    !
    real (DP) :: sig
-   ! the nonzero real or imaginary part of (-i)^L 
+   ! the nonzero real or imaginary part of (-i)^L
    real (DP), parameter :: sixth = 1.d0 / 6.d0
    !
    integer :: nb, mb, ijv, ivl, jvl, ig, lp, l, lm, i0, i1, i2, i3, ind
@@ -69,10 +69,10 @@ attributes(global) subroutine qvan2_kernel(ngy, ih, jh, np, qmod_d, qg_d, ylmk0_
       endif
       ivl = nhtolm_d(ih, np)
       jvl = nhtolm_d(jh, np)
-      
+
       qg_d(1,ig) = 0.d0
       qg_d(2,ig) = 0.d0
-      
+
       qm = qmod_d (ig) * dqi
       px = qm - int (qm)
       ux = 1.d0 - px
@@ -84,7 +84,7 @@ attributes(global) subroutine qvan2_kernel(ngy, ih, jh, np, qmod_d, qg_d, ylmk0_
       i3 = i0 + 3
       uvx = ux * vx * sixth
       pwx = px * wx * 0.5d0
-      
+
       do lm = 1, lpx_d (ivl, jvl)
          lp = lpl_d (ivl, jvl, lm)
           if (lp == 1) then
@@ -130,12 +130,11 @@ end subroutine qvan2_kernel
 #endif
 end module qvan2_gpum
 
-
 subroutine qvan2_gpu (ngy, ih, jh, np, qmod_d, qg_d, ylmk0_d)
   !-----------------------------------------------------------------------
   !
   !    This routine computes the fourier transform of the Q functions
-  !    The interpolation table for the radial fourier transform is stored 
+  !    The interpolation table for the radial fourier transform is stored
   !    in qrad.
   !
   !    The formula implemented here is
@@ -143,13 +142,16 @@ subroutine qvan2_gpu (ngy, ih, jh, np, qmod_d, qg_d, ylmk0_d)
   !     q(g,i,j) = sum_lm (-i)^l ap(lm,i,j) yr_lm(g^) qrad(g,l,i,j)
   !
   !
-  USE upf_kinds,   ONLY: DP
-  USE uspp_data,   ONLY: dq
-  USE uspp_param,  ONLY: lmaxq, nbetam
-  USE uspp,        ONLY: nlx, nhtolm, indv
+  USE upf_kinds,  ONLY : DP
+  USE uspp_data,  ONLY : dq
+  USE uspp_param, ONLY : lmaxq, nbetam
+  USE uspp,       ONLY : nlx, nhtolm, indv
 #if defined(__CUDA)
   USE cudafor
-  USE qvan2_gpum,  ONLY : qvan2_kernel
+  USE qvan2_gpum, ONLY : qvan2_kernel
+#elif defined(__OPENMP_GPU)
+  USE uspp_data,  ONLY : qrad
+  USE uspp,       ONLY : lpl, lpx, ap
 #endif
   !
   implicit none
@@ -188,6 +190,12 @@ subroutine qvan2_gpu (ngy, ih, jh, np, qmod_d, qg_d, ylmk0_d)
 #if defined(__CUDA)
   type(dim3):: grid, tBlock
   attributes(device):: ylmk0_d, qmod_d, qg_d
+#elif defined(__OPENMP_GPU)
+  real (DP) :: sig
+  ! the nonzero real or imaginary part of (-i)^L
+  real (DP), parameter :: sixth = 1.d0 / 6.d0
+  real(DP) :: dqi, qm, px, ux, vx, wx, uvx, pwx, work, qm1
+  real(DP) :: uvwx, pwvx, pwux, pxuvx
 #endif
   !
   nb = indv (ih, np)
@@ -208,6 +216,73 @@ subroutine qvan2_gpu (ngy, ih, jh, np, qmod_d, qg_d, ylmk0_d)
   tBlock = dim3(256,1,1)
   grid = dim3(ceiling(real(ngy)/tBlock%x),1,1)
   call qvan2_kernel<<<grid,tBlock>>>(ngy, ih, jh, np, qmod_d, qg_d, ylmk0_d, lmaxq, nbetam, nlx, dq)
+  !
+#elif defined(__OPENMP_GPU)
+  !$omp target teams distribute parallel do private(dqi, ijv, qm, px, ux, vx, wx, i0, i1, i2, i3, uvx, pwx, lp, l, sig, ind, work)
+  do ig=1,ngy
+     !     compute the indices which correspond to ih,jh
+     dqi = 1.0_DP / dq
+     if (nb.ge.mb) then
+        ijv = nb * (nb - 1) / 2 + mb
+     else
+        ijv = mb * (mb - 1) / 2 + nb
+     endif
+
+     qg_d(1,ig) = 0.d0
+     qg_d(2,ig) = 0.d0
+
+     qm = qmod_d (ig) * dqi
+     px = qm - int (qm)
+     ux = 1.d0 - px
+     vx = 2.d0 - px
+     wx = 3.d0 - px
+     i0 = INT( qm ) + 1
+     i1 = i0 + 1
+     i2 = i0 + 2
+     i3 = i0 + 3
+     uvx = ux * vx * sixth
+     pwx = px * wx * 0.5d0
+
+     do lm = 1, lpx (ivl, jvl)
+        lp = lpl (ivl, jvl, lm)
+         if (lp == 1) then
+            l = 1
+            sig = 1.0d0
+            ind = 1
+         elseif ( lp <= 4) then
+            l = 2
+            sig =-1.0d0
+            ind = 2
+         elseif ( lp <= 9 ) then
+            l = 3
+            sig =-1.0d0
+            ind = 1
+         elseif ( lp <= 16 ) then
+            l = 4
+             sig = 1.0d0
+            ind = 2
+         elseif ( lp <= 25 ) then
+            l = 5
+            sig = 1.0d0
+            ind = 1
+         elseif ( lp <= 36 ) then
+            l = 6
+            sig =-1.0d0
+            ind = 2
+         else
+            l = 7
+            sig =-1.0d0
+            ind = 1
+         endif
+         sig = sig * ap (lp, ivl, jvl)
+         work = qrad (i0, ijv, l, np) * uvx * wx + &
+                qrad (i1, ijv, l, np) * pwx * vx - &
+                qrad (i2, ijv, l, np) * pwx * ux + &
+                qrad (i3, ijv, l, np) * px * uvx
+         qg_d (ind,ig) = qg_d (ind,ig) + sig * ylmk0_d (ig, lp) * work
+     end do
+  end do
+  !$omp end target teams distribute parallel do
   !
 #else
   ! possibly change this to call to CPU version...

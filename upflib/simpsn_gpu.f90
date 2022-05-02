@@ -36,6 +36,7 @@ SUBROUTINE simpson_gpu(mesh, func_d, rab_d, asum)
   r12 = 1.0d0 / 3.0d0
 
   !$cuf kernel do (1) <<<*, *>>>
+  !$omp target teams distribute parallel do reduction(+:asum)
   do i = 2, mesh-1, 2
     asum = asum + func_d(i-1)*rab_d(i-1) + 4.0d0*func_d(i)*rab_d(i) + func_d(i+1)*rab_d(i+1)
   end do
@@ -83,9 +84,11 @@ SUBROUTINE simpsn_gpu_dev(mesh, func_d, rab_d, asum)
   real(DP) :: f1, f2, f3, r12
   INTEGER :: i
   !
+  !$omp declare target(simpsn_gpu_dev)
   asum = 0.0d0
   r12 = 1.0d0 / 3.0d0
 
+  !$omp parallel do reduction(+:asum)
   do i = 2, mesh-1, 2
     asum = asum + func_d(i-1)*rab_d(i-1) + 4.0d0*func_d(i)*rab_d(i) + func_d(i+1)*rab_d(i+1)
   end do

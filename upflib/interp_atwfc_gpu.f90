@@ -6,7 +6,10 @@ SUBROUTINE interp_atwfc_gpu ( npw, qg_d, nwfcm, chiq_d )
   !
   USE upf_kinds,  ONLY : dp
   USE uspp_param, ONLY : upf, nsp
-  USE uspp_data,  ONLY : dq, tab_at, tab_at_d
+  USE uspp_data,  ONLY : dq, tab_at
+#if !defined(__OPENMP_GPU)
+  USE uspp_data,  ONLY : tab_at_d
+#endif
   !
   IMPLICIT NONE
   !
@@ -16,17 +19,22 @@ SUBROUTINE interp_atwfc_gpu ( npw, qg_d, nwfcm, chiq_d )
   REAL(dp), INTENT(OUT):: chiq_d(npw,nwfcm,nsp)
 #if defined(__CUDA)
   attributes(DEVICE) :: qg_d, chiq_d
-#endif 
+#endif
   !
   INTEGER :: nt, nb, ig
   INTEGER :: i0, i1, i2, i3
   REAL(dp):: qgr, px, ux, vx, wx
+  !
+#if defined(__OPENMP_GPU)
+  ASSOCIATE(tab_at_d=>tab_at)
+#endif
   !
   DO nt = 1, nsp
      DO nb = 1, upf(nt)%nwfc
         IF ( upf(nt)%oc(nb) >= 0.d0 ) THEN
            !
            !$cuf kernel do (1) <<<*,*>>>
+           !$omp target teams distribute parallel do
            DO ig = 1, npw
               qgr = qg_d(ig)
               px = qgr / dq - DBLE(INT(qgr/dq))
@@ -47,5 +55,9 @@ SUBROUTINE interp_atwfc_gpu ( npw, qg_d, nwfcm, chiq_d )
         END IF
      END DO
   END DO
+  !
+#if defined(__OPENMP_GPU)
+  ENDASSOCIATE
+#endif
 
 END SUBROUTINE interp_atwfc_gpu

@@ -43,7 +43,8 @@ subroutine sph_bes_gpu (msh, r, q, l, jl)
   real(DP) :: x, xl, xseries = 0.05_dp
   integer :: ir, ir0, ir_, i, n, semifact
   !
-  ! 
+  !$omp declare target
+  !
   !  case q=0
   if (abs (q) < eps14) then
      do ir = 1, msh
@@ -56,7 +57,7 @@ subroutine sph_bes_gpu (msh, r, q, l, jl)
      endif
      enddo
      return
-  end if 
+  end if
 
   !  case l=-1
 
@@ -113,39 +114,36 @@ subroutine sph_bes_gpu (msh, r, q, l, jl)
         jl (ir) = (sin (q * r (ir) ) / (q * r (ir) ) - &
                      cos (q * r (ir) ) ) / (q * r (ir) )
      elseif (l == 2) then
-     
+
         jl (ir) = ( (3.d0 / (q*r(ir)) - (q*r(ir)) ) * sin (q*r(ir)) - &
                        3.d0 * cos (q*r(ir)) ) / (q*r(ir))**2
-     
+
      elseif (l == 3) then
-     
-     
+
         jl (ir) = (sin (q*r(ir)) * &
                      (15.d0 / (q*r(ir)) - 6.d0 * (q*r(ir)) ) + &
                      cos (q*r(ir)) * ( (q*r(ir))**2 - 15.d0) ) / &
                      (q*r(ir)) **3
-     
+
      elseif (l == 4) then
-     
-     
+
         jl (ir) = (sin (q*r(ir)) * &
                      (105.d0 - 45.d0 * (q*r(ir))**2 + (q*r(ir))**4) + &
                      cos (q*r(ir)) * &
                      (10.d0 * (q*r(ir))**3 - 105.d0 * (q*r(ir))) ) / &
                         (q*r(ir))**5
-     
+
      elseif (l == 5) then
-     
+
         jl (ir) = (-cos(q*r(ir)) - &
                      (945.d0*cos(q*r(ir))) / (q*r(ir)) ** 4 + &
                      (105.d0*cos(q*r(ir))) / (q*r(ir)) ** 2 + &
                      (945.d0*sin(q*r(ir))) / (q*r(ir)) ** 5 - &
                      (420.d0*sin(q*r(ir))) / (q*r(ir)) ** 3 + &
                      ( 15.d0*sin(q*r(ir))) / (q*r(ir)) ) / (q*r(ir))
-     
+
      elseif (l == 6) then
-     
-     
+
         jl (ir) = ((-10395.d0*cos(q*r(ir))) / (q*r(ir))**5 + &
                      (  1260.d0*cos(q*r(ir))) / (q*r(ir))**3 - &
                      (    21.d0*cos(q*r(ir))) / (q*r(ir))    - &
@@ -153,14 +151,14 @@ subroutine sph_bes_gpu (msh, r, q, l, jl)
                      ( 10395.d0*sin(q*r(ir))) / (q*r(ir))**6 - &
                      (  4725.d0*sin(q*r(ir))) / (q*r(ir))**4 + &
                      (   210.d0*sin(q*r(ir))) / (q*r(ir))**2 ) / (q*r(ir))
-     
+
      !else
      !
      !   call upf_error ('sph_bes', 'not implemented', abs(l))
 
      endif
      !if (l > 6 ) call upf_error ('sph_bes', 'not implemented', abs(l))
-  end do 
+  end do
   !
   return
 end subroutine sph_bes_gpu
