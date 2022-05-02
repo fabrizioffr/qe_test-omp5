@@ -19,20 +19,21 @@ SUBROUTINE force_cc_gpu( forcecc )
   USE cell_base,            ONLY : alat, omega, tpiba, tpiba2
   USE fft_base,             ONLY : dfftp
   USE fft_interfaces,       ONLY : fwfft
-  USE gvect,                ONLY : ngm, gstart, g, g_d, gg, ngl, gl, gl_d, &
-                                   igtongl, igtongl_d
+  USE gvect,                ONLY : ngm, gstart, g, gg, ngl, gl, igtongl
+#if !defined(__OPENMP_GPU)
+  USE gvect,                ONLY : gl_d, igtongl_d
+  USE gvect_gpum,           ONLY : g_d
+  USE devxlib_memcopy,      ONLY : dev_memcpy => devxlib_memcpy_h2d
+#endif
   USE ener,                 ONLY : etxc, vtxc
   USE lsda_mod,             ONLY : nspin
   USE scf,                  ONLY : rho, rho_core, rhog_core
   USE control_flags,        ONLY : gamma_only
   USE noncollin_module,     ONLY : noncolin
-  USE wavefunctions, ONLY : psic
+  USE wavefunctions,        ONLY : psic
   USE mp_bands,             ONLY : intra_bgrp_comm
   USE mp,                   ONLY : mp_sum
-#if defined(__CUDA)
-  USE device_fbuff_m,             ONLY : dev_buf
-  USE device_memcpy_m,        ONLY : dev_memcpy
-#endif
+  USE devxlib_buffers,      ONLY : dev_buf => gpu_buffer
   !
   IMPLICIT NONE
   !
@@ -60,8 +61,12 @@ SUBROUTINE force_cc_gpu( forcecc )
   integer           :: maxmesh
 #if defined(__CUDA)
   attributes(DEVICE) :: rhocg_d, psic_d, nl_d, r_d, rab_d, rhoc_d
+#endif
+#if defined(__CUDA) || defined(__OPENMP_GPU)
   !
+#if !defined(__OPENMP_GPU)
   nl_d => dfftp%nl_d
+#endif
   !
   forcecc(:,:) = 0.d0
   !
@@ -94,10 +99,16 @@ SUBROUTINE force_cc_gpu( forcecc )
   !
   DEALLOCATE( vxc )
   !
+#if defined(__OPENMP_GPU)
+  !$omp target update to(psic)
+  !$omp dispatch
+  CALL fwfft (1, psic, dfftp)
+#else
   CALL dev_buf%lock_buffer(psic_d, dfftp%nnr, ierrs(1))
   IF (ierrs(1) /= 0) CALL errore( 'force_cc_gpu', 'cannot allocate buffers', ABS(ierrs(1)) )
   CALL dev_memcpy( psic_d, psic, (/ 1, dfftp%nnr /) )
   CALL fwfft (1, psic_d, dfftp)
+#endif
   !
   ! ... psic contains now Vxc(G)
   !
@@ -106,24 +117,33 @@ SUBROUTINE force_cc_gpu( forcecc )
   ! ... core correction term: sum on g of omega*ig*exp(-i*r_i*g)*n_core(g)*vxc
   ! g = 0 term gives no contribution
   !
-  maxmesh = MAXVAL(msh(1:ntyp))
   CALL dev_buf%lock_buffer(rhocg_d, ngl, ierrs(2) )
+#if !defined(__OPENMP_GPU)
+  maxmesh = MAXVAL(msh(1:ntyp))
   CALL dev_buf%lock_buffer(r_d, maxmesh, ierrs(3) )
   CALL dev_buf%lock_buffer(rab_d, maxmesh, ierrs(4) )
   CALL dev_buf%lock_buffer(rhoc_d, maxmesh, ierrs(5) )
-  IF (ANY(ierrs /= 0)) CALL errore('force_cc_gpu', 'cannot allocate buffers', ABS(MAXVAL(ierrs)) )
+  IF (ANY(ierrs /= 0)) CALL errore('force_cc_gpu', 'cannot allocate buffers', -1)
+#endif
   !
   ! ... core correction term: sum on g of omega*ig*exp(-i*r_i*g)*n_core(g)*vxc
   ! g = 0 term gives no contribution
   !
+  !$omp target data map(to:rgrid(nt)%r, rgrid(nt)%rab, upf(nt)%rho_atc)
   DO nt = 1, ntyp
      IF ( upf(nt)%nlcc ) THEN
+#if defined(__OPENMP_GPU)
+        !
+        CALL drhoc_gpu( ngl, gl, omega, tpiba2, msh(nt), rgrid(nt)%r(1:msh(nt)), &
+                         rgrid(nt)%rab(1:msh(nt)), upf(nt)%rho_atc, rhocg_d)
+#else
         r_d(1:msh(nt)) = rgrid(nt)%r(1:msh(nt))
         rab_d(1:msh(nt)) = rgrid(nt)%rab(1:msh(nt))
         rhoc_d(1:msh(nt)) = upf(nt)%rho_atc
         !
         CALL drhoc_gpu( ngl, gl_d, omega, tpiba2, msh(nt), r_d, &
                          rab_d, rhoc_d, rhocg_d)
+#endif
         DO na = 1, nat
            IF (nt == ityp (na) ) THEN
               tau1 = tau(1, na)
@@ -135,7 +155,22 @@ SUBROUTINE force_cc_gpu( forcecc )
               forcelc_z = 0.d0
 
               !$cuf kernel do (1) <<<*, *>>>
+              !$omp target teams distribute parallel do reduction(+:forcelc_x) &
+              !$omp &                                   reduction(+:forcelc_y) &
+              !$omp &                                   reduction(+:forcelc_z) &
+              !$omp & map(tofrom:forcelc_x, forcelc_y, forcelc_z)
               do ig = gstart, ngm
+#if defined(__OPENMP_GPU)
+                 arg = (g (1, ig) * tau1 + g (2, ig) * tau2 &
+                      + g (3, ig) * tau3 ) * tpi
+                 prod = tpiba * omega * &
+                      rhocg_d (igtongl (ig) ) * dble(CONJG(psic (dfftp%nl (ig) ) ) * &
+                      CMPLX( sin (arg), cos (arg), kind=DP))* fact
+
+                 forcelc_x = forcelc_x + g (1, ig) * prod
+                 forcelc_y = forcelc_y + g (2, ig) * prod
+                 forcelc_z = forcelc_z + g (3, ig) * prod
+#else
                  arg = (g_d (1, ig) * tau1 + g_d (2, ig) * tau2 &
                       + g_d (3, ig) * tau3 ) * tpi
                  prod = tpiba * omega * &
@@ -145,6 +180,7 @@ SUBROUTINE force_cc_gpu( forcecc )
                  forcelc_x = forcelc_x + g_d (1, ig) * prod
                  forcelc_y = forcelc_y + g_d (2, ig) * prod
                  forcelc_z = forcelc_z + g_d (3, ig) * prod
+#endif
               ENDDO
 
               forcecc(1, na) = forcecc(1, na) + forcelc_x
@@ -158,10 +194,14 @@ SUBROUTINE force_cc_gpu( forcecc )
   CALL mp_sum( forcecc, intra_bgrp_comm )
   !
   CALL dev_buf%release_buffer(rhocg_d, ierrs(1) )
+#if defined(__OPENMP_GPU)
+  !$omp end target data
+#else
   CALL dev_buf%release_buffer(psic_d, ierrs(2) )
   CALL dev_buf%release_buffer(r_d, ierrs(3) )
   CALL dev_buf%release_buffer(rab_d, ierrs(4) )
   CALL dev_buf%release_buffer(rhoc_d, ierrs(5) )
+#endif
 #endif
   !
   RETURN

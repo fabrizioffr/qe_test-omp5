@@ -11,22 +11,28 @@ SUBROUTINE stres_har_gpu( sigmahar )
   !--------------------------------------------------------------------
   !! Calculates the Hartree contribution to the stress
   !
-  USE kinds,              ONLY: DP
-  USE constants,          ONLY: e2, fpi
-  USE cell_base,          ONLY: omega, tpiba2
-  USE ener,               ONLY: ehart
-  USE fft_base,           ONLY: dfftp
-  USE fft_interfaces,     ONLY: fwfft
-  USE gvect,              ONLY: ngm, gstart
-  USE scf,                ONLY: rho
-  USE control_flags,      ONLY: gamma_only
-  USE wavefunctions,      ONLY: psic
-  USE mp_bands,           ONLY: intra_bgrp_comm
-  USE mp,                 ONLY: mp_sum
-  USE Coul_cut_2D,        ONLY: do_cutoff_2D, cutoff_stres_sigmahar_gpu
+  USE kinds,              ONLY : DP
+  USE constants,          ONLY : e2, fpi
+  USE cell_base,          ONLY : omega, tpiba2
+  USE ener,               ONLY : ehart
+  USE fft_base,           ONLY : dfftp
+  USE fft_interfaces,     ONLY : fwfft
+  USE gvect,              ONLY : ngm, gstart
+  USE scf,                ONLY : rho
+  USE control_flags,      ONLY : gamma_only
+  USE wavefunctions,      ONLY : psic
+  USE mp_bands,           ONLY : intra_bgrp_comm
+  USE mp,                 ONLY : mp_sum
+  USE Coul_cut_2D,        ONLY : do_cutoff_2D, cutoff_stres_sigmahar_gpu
   !
-  USE gvect,              ONLY: g_d, gg_d
-  USE wavefunctions_gpum, ONLY: using_psic, using_psic_d, psic_d
+#if defined(__OPENMP_GPU)
+  USE gvect,              ONLY : g, gg
+  USE wavefunctions,      ONLY : psic
+#else
+  USE gvect_gpum,         ONLY : g_d, gg_d
+  USE wavefunctions_gpum, ONLY : psic_d
+#endif
+  USE wavefunctions_gpum, ONLY : using_psic, using_psic_d
   !
   IMPLICIT NONE
   !
@@ -55,7 +61,12 @@ SUBROUTINE stres_har_gpu( sigmahar )
   !
   CALL using_psic_d(1)
   !
+#if defined(__OPENMP_GPU)
+  !$omp dispatch
+  CALL fwfft( 1, psic, dfftp )
+#else
   CALL fwfft( 1, psic_d, dfftp )
+#endif
   ! psic contains now the charge density in G space
   ! the  G=0 component is not computed
   !
@@ -63,7 +74,11 @@ SUBROUTINE stres_har_gpu( sigmahar )
   !
   IF (do_cutoff_2D) THEN
      !
+#if defined(__OPENMP_GPU)
+     CALL cutoff_stres_sigmahar_gpu( psic, sigmahar )
+#else
      CALL cutoff_stres_sigmahar_gpu( psic_d, sigmahar )
+#endif
      !
   ELSE
      !
@@ -71,6 +86,36 @@ SUBROUTINE stres_har_gpu( sigmahar )
      sigmahar21 = 0._DP  ;  sigmahar32 = 0._DP
      sigmahar22 = 0._DP  ;  sigmahar33 = 0._DP
      !
+#if defined(__OPENMP_GPU)
+     !$omp target teams distribute parallel do reduction(+:sigmahar11) &
+     !$omp &                                   reduction(+:sigmahar21) &
+     !$omp &                                   reduction(+:sigmahar22) &
+     !$omp &                                   reduction(+:sigmahar31) &
+     !$omp &                                   reduction(+:sigmahar32) &
+     !$omp &                                   reduction(+:sigmahar33) &
+     !$omp & map(tofrom:sigmahar11, sigmahar21, sigmahar22)            &
+     !$omp & map(tofrom:sigmahar31, sigmahar32, sigmahar33)
+     DO ig = gstart, ngm
+       !
+       g2 = gg(ig)
+       !
+       shart = DBLE(psic(dfftp%nl(ig))*CONJG(psic(dfftp%nl(ig)))) / g2
+       !
+       sigmahar11 = sigmahar11 + shart *2._DP * &
+                                 g(1,ig) * g(1,ig) / g2
+       sigmahar21 = sigmahar21 + shart *2._DP * &
+                                 g(2,ig) * g(1,ig) / g2
+       sigmahar22 = sigmahar22 + shart *2._DP * &
+                                 g(2,ig) * g(2,ig) / g2
+       sigmahar31 = sigmahar31 + shart *2._DP * &
+                                 g(3,ig) * g(1,ig) / g2
+       sigmahar32 = sigmahar32 + shart *2._DP * &
+                                 g(3,ig) * g(2,ig) / g2
+       sigmahar33 = sigmahar33 + shart *2._DP * &
+                                 g(3,ig) * g(3,ig) / g2
+     ENDDO
+     !$omp end target teams distribute parallel do
+#else
      nl_d => dfftp%nl_d
      !
      !$cuf kernel do (1) <<<*,*>>>
@@ -93,6 +138,7 @@ SUBROUTINE stres_har_gpu( sigmahar )
        sigmahar33 = sigmahar33 + shart *2._DP * &
                                  g_d(3,ig) * g_d(3,ig) / g2
      ENDDO
+#endif
      !
      sigmahar(1,1) = sigmahar(1,1) + sigmahar11 / tpiba2
      sigmahar(2,1) = sigmahar(2,1) + sigmahar21 / tpiba2

@@ -36,7 +36,9 @@ SUBROUTINE stress( sigma )
   USE libmbd_interface, ONLY : HmbdvdW
   USE esm,              ONLY : do_comp_esm, esm_bc ! for ESM stress
   USE esm,              ONLY : esm_stres_har, esm_stres_ewa, esm_stres_loclong ! for ESM stress
+#if !defined(__OPENMP_GPU)
   USE gvect,            ONLY : g_d, gg_d
+#endif
   !
   IMPLICIT NONE
   !
@@ -100,7 +102,7 @@ SUBROUTINE stress( sigma )
   CALL stres_gradcorr( rho%of_r, rho%of_g, rho_core, rhog_core, rho%kin_r, &
        nspin, dfftp, g, alat, omega, sigmaxc )
   !
-  !  meta-GGA contribution 
+  !  meta-GGA contribution
   !
   IF (.NOT. use_gpu) CALL stres_mgga( sigmaxc )
   IF (      use_gpu) CALL stres_mgga_gpu( sigmaxc )
@@ -118,9 +120,15 @@ SUBROUTINE stress( sigma )
      IF (.NOT. use_gpu) CALL stres_ewa( alat, nat, ntyp, ityp, zv, at,      &
                                         bg, tau, omega, g, gg, ngm, gstart, &
                                         gamma_only, gcutm, sigmaewa )
+#if defined(__OPENMP_GPU)
+     IF (      use_gpu) CALL stres_ewa_gpu( alat, nat, ntyp, ityp, zv, at, bg,&
+                                            tau, omega, g,gg, ngm, gstart,&
+                                            gamma_only, gcutm, sigmaewa )
+#else
      IF (      use_gpu) CALL stres_ewa_gpu( alat, nat, ntyp, ityp, zv, at, bg,&
                                             tau, omega, g_d,gg_d, ngm, gstart,&
                                             gamma_only, gcutm, sigmaewa )
+#endif
   END IF
   !
   ! semi-empirical dispersion contribution: Grimme-D2 and D3

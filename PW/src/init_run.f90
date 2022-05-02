@@ -16,8 +16,10 @@ SUBROUTINE init_run()
   USE control_flags,      ONLY : lmd, gamma_only, smallmem, ts_vdw, mbd_vdw, &
                                  lforce => tprnfor, tstress
   USE gvect,              ONLY : g, gg, mill, gcutm, ig_l2g, ngm, ngm_g, &
-                                 g_d, gg_d, mill_d, gshells, &
-                                 gstart ! to be communicated to the Solvers if gamma_only
+                                 gshells, gstart ! to be communicated to the Solvers if gamma_only
+#if !defined(__OPENMP_GPU)
+  USE gvect,              ONLY : g_d, gg_d, mill_d
+#endif
   USE gvecs,              ONLY : gcutms, ngms
   USE cell_base,          ONLY : at, bg, set_h_ainv
   USE cellmd,             ONLY : lmovecell
@@ -30,15 +32,15 @@ SUBROUTINE init_run()
   USE bp,                 ONLY : allocate_bp_efield, bp_global_map
   USE fft_base,           ONLY : dfftp, dffts
   USE recvec_subs,        ONLY : ggen, ggens
-  USE wannier_new,        ONLY : use_wannier    
+  USE wannier_new,        ONLY : use_wannier
   USE dfunct,             ONLY : newd
   USE esm,                ONLY : do_comp_esm, esm_init
   USE tsvdw_module,       ONLY : tsvdw_initialize
   USE libmbd_interface,   ONLY : init_mbd
-  USE Coul_cut_2D,        ONLY : do_cutoff_2D, cutoff_fact 
+  USE Coul_cut_2D,        ONLY : do_cutoff_2D, cutoff_fact
   USE lsda_mod,           ONLY : nspin
   USE noncollin_module,   ONLY : domag
-  USE xc_lib,             ONLY : xclib_dft_is_libxc, xclib_init_libxc, xclib_dft_is 
+  USE xc_lib,             ONLY : xclib_dft_is_libxc, xclib_init_libxc, xclib_dft_is
   !
   USE control_flags,      ONLY : use_gpu
   USE dfunct_gpum,        ONLY : newd_gpu
@@ -86,6 +88,7 @@ SUBROUTINE init_run()
   END IF
 #endif
   !$acc update device(mill, g)
+  !$omp target update to(mill, g, gg)
   !
   IF (do_comp_esm) CALL esm_init()
   !
@@ -119,7 +122,7 @@ SUBROUTINE init_run()
   !
   wg(:,:) = 0.D0
   CALL using_wg(2)
-#if defined(__CUDA)
+#if defined(__CUDA) || defined(__OPENMP_GPU)
   ! Sync here. Shouldn't be done and will be removed ASAP.
   CALL using_wg_d(0)
 #endif

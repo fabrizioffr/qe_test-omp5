@@ -17,13 +17,24 @@ SUBROUTINE atomic_wfc_gpu( ik, wfcatom_d )
   USE cell_base,        ONLY : omega, tpiba
   USE ions_base,        ONLY : nat, ntyp => nsp, ityp, tau
   USE basis,            ONLY : natomwfc
-  USE gvect,            ONLY : mill_d, eigts1_d, eigts2_d, eigts3_d, g_d
-  USE klist,            ONLY : xk, ngk, igk_k_d !, igk_k
+  USE klist,            ONLY : xk, ngk, &
+#if !defined(__OPENMP_GPU)
+                               igk_k_d
+#else
+                               igk_k
+#endif
   USE wvfct,            ONLY : npwx
   USE uspp_param,       ONLY : upf, nwfcm
   USE noncollin_module, ONLY : noncolin, domag, npol, angle1, angle2, &
                                starting_spin_angle
   USE upf_spinorb,      ONLY : rot_ylm, lmaxx
+#if !defined(__OPENMP_GPU)
+  USE gvect,            ONLY : mill_d, eigts1_d, eigts2_d, eigts3_d, g_d
+#else
+  USE omp_lib
+  USE mp,               ONLY : mp_sum_mapped
+  USE gvect,            ONLY : mill, eigts1, eigts2, eigts3, g
+#endif
   !
   IMPLICIT NONE
   !
@@ -47,7 +58,9 @@ SUBROUTINE atomic_wfc_gpu( ik, wfcatom_d )
   !
 #if defined(__CUDA)
   attributes(DEVICE) :: wfcatom_d, ylm_d, gk_d, qg_d, sk_d, chiq_d, aux_d
-#endif  
+#elif defined(__OPENMP_GPU)
+  INTEGER     :: i, j , k
+#endif
   !
   CALL start_clock( 'atomic_wfc' )
 
@@ -59,13 +72,24 @@ SUBROUTINE atomic_wfc_gpu( ik, wfcatom_d )
   !
   npw = ngk(ik)
   !
+#if !defined(__OPENMP_GPU)
   ALLOCATE( ylm_d(npw,(lmax_wfc+1)**2), gk_d(3,npw), qg_d(npw) )
   ALLOCATE( chiq_d(npw,nwfcm,ntyp), sk_d(npw) )
+#else
+  !call omp_target_alloc_f(fptr_dev=ylm_d,  dimensions=[npw,(lmax_wfc+1)**2])
+  !call omp_target_alloc_f(fptr_dev=gk_d,   dimensions=[3,npw])
+  !call omp_target_alloc_f(fptr_dev=qg_d,   dimensions=[npw])
+  !call omp_target_alloc_f(fptr_dev=chiq_d, dimensions=[npw,nwfcm,ntyp])
+  !call omp_target_alloc_f(fptr_dev=sk_d,   dimensions=[npw])
+  !$omp allocate allocator(omp_target_device_mem_alloc)
+  ALLOCATE( ylm_d(npw,(lmax_wfc+1)**2), gk_d(3,npw), qg_d(npw), chiq_d(npw,nwfcm,ntyp), sk_d(npw) )
+#endif
   !
   xk1 = xk(1,ik)
   xk2 = xk(2,ik)
   xk3 = xk(3,ik)
   !
+#if !defined(__OPENMP_GPU)
   !$cuf kernel do (1) <<<*,*>>>
   DO ig = 1, npw
      iig = igk_k_d(ig,ik)
@@ -74,6 +98,17 @@ SUBROUTINE atomic_wfc_gpu( ik, wfcatom_d )
      gk_d(3,ig) = xk3 + g_d(3,iig)
      qg_d(ig) = gk_d(1,ig)**2 +  gk_d(2,ig)**2 + gk_d(3,ig)**2
   END DO
+#else
+  !$omp target teams distribute parallel do
+  DO ig = 1, npw
+     iig = igk_k(ig,ik)
+     gk_d(1,ig) = xk1 + g(1,iig)
+     gk_d(2,ig) = xk2 + g(2,iig)
+     gk_d(3,ig) = xk3 + g(3,iig)
+     qg_d(ig) = gk_d(1,ig)**2 +  gk_d(2,ig)**2 + gk_d(3,ig)**2
+  END DO
+  !$omp end target teams distribute parallel do
+#endif
   !
   !  ylm = spherical harmonics
   !
@@ -82,6 +117,7 @@ SUBROUTINE atomic_wfc_gpu( ik, wfcatom_d )
   ! set now q=|k+G| in atomic units
   !
   !$cuf kernel do (1) <<<*,*>>>
+  !$omp target teams distribute parallel do
   DO ig = 1, npw
      qg_d(ig) = SQRT( qg_d(ig) )*tpiba
   END DO
@@ -92,11 +128,36 @@ SUBROUTINE atomic_wfc_gpu( ik, wfcatom_d )
   !
   CALL interp_atwfc_gpu ( npw, qg_d, nwfcm, chiq_d )
   !
+#if !defined(__OPENMP_GPU)
   DEALLOCATE( qg_d, gk_d )
+#else
+  !call omp_target_free_f(fptr_dev=qg_d)
+  !call omp_target_free_f(fptr_dev=gk_d)
+  DEALLOCATE( qg_d, gk_d )
+#endif
   !
+#if !defined(__OPENMP_GPU)
   IF (noncolin) ALLOCATE( aux_d(npw) )
+#else
+  IF (noncolin) THEN
+     !call omp_target_alloc_f(fptr_dev=aux_d, dimensions=[npw])
+     !$omp allocate allocator(omp_target_device_mem_alloc)
+     ALLOCATE( aux_d(npw) )
+  ENDIF
+#endif
   !
+#if !defined(__OPENMP_GPU)
   wfcatom_d(:,:,:) = (0.0_dp, 0.0_dp)
+#else
+  !$omp target teams distribute parallel do collapse(3)
+  do k=1, natomwfc
+     do j=1, npol
+        do i=1, npwx
+           wfcatom_d(i,j,k) = (0.0_dp, 0.0_dp)
+        enddo
+     enddo
+  enddo
+#endif
   !
   DO na = 1, nat
      arg = (xk1*tau(1,na) + xk2*tau(2,na) + xk3*tau(3,na)) * tpi
@@ -104,6 +165,7 @@ SUBROUTINE atomic_wfc_gpu( ik, wfcatom_d )
      !
      !     sk is the structure factor
      !
+#if !defined(__OPENMP_GPU)
      !$cuf kernel do (1) <<<*,*>>>
      DO ig = 1, npw
         iig = igk_k_d(ig,ik)
@@ -114,6 +176,18 @@ SUBROUTINE atomic_wfc_gpu( ik, wfcatom_d )
                             eigts2_d(mil2,na) * &
                             eigts3_d(mil3,na)
      END DO
+#else
+  !$omp target teams distribute parallel do
+     DO ig = 1, npw
+        iig = igk_k(ig,ik)
+        mil1 = mill(1,iig)
+        mil2 = mill(2,iig)
+        mil3 = mill(3,iig)
+        sk_d(ig) = kphase * eigts1(mil1,na) * &
+                            eigts2(mil2,na) * &
+                            eigts3(mil3,na)
+     END DO
+#endif
      !
      nt = ityp(na)
      DO nb = 1, upf(nt)%nwfc
@@ -155,8 +229,19 @@ SUBROUTINE atomic_wfc_gpu( ik, wfcatom_d )
   IF ( n_starting_wfc /= natomwfc) call errore ('atomic_wfc', &
        'internal error: some wfcs were lost ', 1 )
 
+#if !defined(__OPENMP_GPU)
   IF (noncolin) DEALLOCATE( aux_d )
   DEALLOCATE( sk_d, chiq_d, ylm_d )
+#else
+  !IF (noncolin) THEN
+  !   call omp_target_free_f(fptr_dev=aux_d)
+  !ENDIF
+  !call omp_target_free_f(fptr_dev=sk_d)
+  !call omp_target_free_f(fptr_dev=chiq_d)
+  !call omp_target_free_f(fptr_dev=ylm_d)
+  IF (noncolin) DEALLOCATE( aux_d )
+  DEALLOCATE( sk_d, chiq_d, ylm_d )
+#endif
 
   CALL stop_clock( 'atomic_wfc' )
   RETURN
@@ -171,6 +256,9 @@ CONTAINS
    COMPLEX(DP) :: rot_ylm_in1
    REAL(DP), EXTERNAL :: spinor
    INTEGER :: ind, ind1, n1, is, sph_ind
+#if defined(__OPENMP_GPU)
+   INTEGER :: i
+#endif
    !
    j = upf(nt)%jchi(nb)
    DO m = -l-1, l
@@ -180,17 +268,25 @@ CONTAINS
          n_starting_wfc = n_starting_wfc + 1
          IF (n_starting_wfc > natomwfc) CALL errore &
               ('atomic_wfc_so', 'internal error: too many wfcs', 1)
-         !     
+         !
          DO is = 1, 2
             fact_is = fact(is)
             IF (ABS(fact(is)) > 1.d-8) THEN
                ind = lmaxx + 1 + sph_ind(l,j,m,is)
+#if !defined(__OPENMP_GPU)
                aux_d = (0.d0,0.d0)
+#else
+               !$omp target teams distribute parallel do
+               do i=1, npw
+                  aux_d(i) = (0.0d0,0.0d0)
+               enddo
+#endif
                DO n1 = 1, 2*l+1
                   ind1 = l**2+n1
                   rot_ylm_in1 = rot_ylm(ind,n1)
                   IF (ABS(rot_ylm_in1) > 1.d-8) THEN
                     !$cuf kernel do (1) <<<*,*>>>
+                    !$omp target teams distribute parallel do
                     DO ig = 1, npw
                       aux_d(ig) = aux_d(ig) + rot_ylm_in1 * &
                                   CMPLX(ylm_d(ig,ind1))
@@ -198,13 +294,21 @@ CONTAINS
                   ENDIF
                ENDDO
                !$cuf kernel do (1) <<<*,*>>>
+               !$omp target teams distribute parallel do
                DO ig = 1, npw
                   wfcatom_d(ig,is,n_starting_wfc) = lphase * &
                                 sk_d(ig)*aux_d(ig)*CMPLX(fact_is* &
                                 chiq_d(ig,nb,nt))
                END DO
             ELSE
+#if !defined(__OPENMP_GPU)
                 wfcatom_d(:,is,n_starting_wfc) = (0.d0,0.d0)
+#else
+                !$omp target teams distribute parallel do
+                do i=1, npwx
+                   wfcatom_d(i,is,n_starting_wfc) = (0.0d0,0.0d0)
+                enddo
+#endif
             END IF
          END DO
          !
@@ -212,7 +316,7 @@ CONTAINS
    END DO
    !
   END SUBROUTINE atomic_wfc_so_gpu
-  ! 
+  !
   SUBROUTINE atomic_wfc_so_mag_gpu( )
    !
    !! Spin-orbit case, magnetization along "angle1" and "angle2"
@@ -223,7 +327,7 @@ CONTAINS
    !! done in the noncollinear case.
    !
    REAL(DP) :: alpha, gamman, j
-   COMPLEX(DP) :: fup, fdown  
+   COMPLEX(DP) :: fup, fdown
    REAL(DP), ALLOCATABLE :: chiaux_d(:)
    INTEGER :: nc, ib, ig
    !
@@ -234,16 +338,23 @@ CONTAINS
    j = upf(nt)%jchi(nb)
    !
    !  This routine creates two functions only in the case j=l+1/2 or exit in the
-   !  other case 
-   !    
+   !  other case
+   !
    IF (ABS(j-l+0.5_DP)<1.d-4) RETURN
 
+#if !defined(__OPENMP_GPU)
    ALLOCATE( chiaux_d(npw) )
+#else
+   !call omp_target_alloc_f(fptr_dev=chiaux_d, dimensions=[npw])
+   !$omp allocate allocator(omp_target_device_mem_alloc)
+   ALLOCATE( chiaux_d(npw) )
+#endif
    !
    !  Find the functions j=l-1/2
    !
    IF (l == 0)  THEN
       !$cuf kernel do
+      !$omp target teams distribute parallel do
       DO ig = 1, npw
          chiaux_d(ig) = chiq_d(ig,nb,nt)
       END DO
@@ -259,6 +370,7 @@ CONTAINS
       !  Average the two functions
       !
       !$cuf kernel do (1) <<<*,*>>>
+      !$omp target teams distribute parallel do
       DO ig = 1, npw
         chiaux_d(ig) = (chiq_d(ig,nb,nt)*DBLE(l+1)+chiq_d(ig,nc,nt)*l)/ &
                        DBLE(2*l+1)
@@ -278,6 +390,7 @@ CONTAINS
             ('atomic_wfc_nc', 'internal error: too many wfcs', 1)
       !
       !$cuf kernel do (1) <<<*,*>>>
+      !$omp target teams distribute parallel do
       DO ig = 1, npw
         aux_d(ig) = sk_d(ig)* CMPLX(ylm_d(ig,lm)*chiaux_d(ig))
       END DO
@@ -286,6 +399,7 @@ CONTAINS
       ! first : rotation with angle alpha around (OX)
       !
       !$cuf kernel do (1) <<<*,*>>>
+      !$omp target teams distribute parallel do
       DO ig = 1, npw
          fup = CMPLX(COS(0.5d0*alpha))*aux_d(ig)
          fdown = (0.d0,1.d0)*CMPLX(SIN(0.5d0*alpha))*aux_d(ig)
@@ -317,7 +431,12 @@ CONTAINS
    !
    n_starting_wfc = n_starting_wfc + 2*l+1
    !
+#if !defined(__OPENMP_GPU)
    DEALLOCATE( chiaux_d )
+#else
+   !call omp_target_free_f(fptr_dev=chiaux_d)
+   DEALLOCATE( chiaux_d )
+#endif
    !
   END SUBROUTINE atomic_wfc_so_mag_gpu
   !
@@ -328,7 +447,7 @@ CONTAINS
    !
    REAL(DP) :: alpha, gamman
    COMPLEX(DP) :: fup, fdown
-   INTEGER :: m, lm, ig  
+   INTEGER :: m, lm, ig
    !
    alpha = angle1(nt)
    gamman = - angle2(nt) + 0.5d0*pi
@@ -339,6 +458,7 @@ CONTAINS
       IF ( n_starting_wfc + 2*l+1 > natomwfc) CALL errore &
             ('atomic_wfc_nc', 'internal error: too many wfcs', 1)
       !$cuf kernel do (1) <<<*,*>>>
+      !$omp target teams distribute parallel do
       DO ig = 1, npw
          aux_d(ig) = sk_d(ig)*CMPLX(ylm_d(ig,lm)*chiq_d(ig,nb,nt))
       END DO
@@ -347,6 +467,7 @@ CONTAINS
       ! first : rotation with angle alpha around (OX)
       !
       !$cuf kernel do (1) <<<*,*>>>
+      !$omp target teams distribute parallel do
       DO ig = 1, npw
          fup = CMPLX(COS(0.5d0*alpha))*aux_d(ig)
          fdown = (0.d0,1.d0)*CMPLX(SIN(0.5d0*alpha))*aux_d(ig)
@@ -393,6 +514,7 @@ CONTAINS
          ('atomic_wfc___', 'internal error: too many wfcs', 1)
       !
       !$cuf kernel do (1) <<<*,*>>>
+      !$omp target teams distribute parallel do
       DO ig = 1, npw
          wfcatom_d(ig,1,n_starting_wfc) = lphase * &
             sk_d(ig) * CMPLX(ylm_d(ig,lm) * chiq_d(ig,nb,nt))

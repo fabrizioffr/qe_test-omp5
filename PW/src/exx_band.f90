@@ -9,9 +9,9 @@ MODULE exx_band
   !---------------------------------------------------------------------------
   !! Variables and subroutines for band parallelization over pairs of bands.
   !
-  !! See:  
+  !! See:
   !! T. Barnes, T. Kurth, P. Carrier, N. Wichmann, D. Prendergast,
-  !! P.R.C. Kent, J. Deslippe, Comp. Phys. Comm. (2017),  
+  !! P.R.C. Kent, J. Deslippe, Comp. Phys. Comm. (2017),
   !! doi.org/10.1016/j.cpc.2017.01.008
   !
   USE kinds,                ONLY : DP
@@ -26,12 +26,15 @@ MODULE exx_band
   !
   SAVE
   !
+  !$omp declare target(igk_exx)
   COMPLEX(DP), ALLOCATABLE :: evc_exx(:,:)
   COMPLEX(DP), ALLOCATABLE :: psi_exx(:,:), hpsi_exx(:,:)
   INTEGER :: lda_original, n_original
   INTEGER :: nwordwfc_exx
   INTEGER, ALLOCATABLE :: igk_exx(:,:)
+#if !defined(__OPENMP_GPU)
   INTEGER, ALLOCATABLE :: igk_exx_d(:,:)
+#endif
 #if defined(__CUDA)
   attributes(DEVICE) :: igk_exx_d
 #endif
@@ -120,9 +123,13 @@ MODULE exx_band
           ALLOCATE( igk_exx( npwx, nks ) )
           igk_exx = igk_k
        END IF
+#if defined(__OPENMP_GPU)
+       !$omp target enter data map(alloc:igk_exx)
+#else
        IF(use_gpu .and. ( .not. allocated(igk_exx_d) ) ) THEN
           ALLOCATE( igk_exx_d, source=igk_exx )
        END IF
+#endif
 
        !
        ! get the wfc buffer is used
@@ -205,7 +212,7 @@ MODULE exx_band
     INTEGER, INTENT(IN) :: lda
     INTEGER, INTENT(IN) :: m
     INTEGER, INTENT(INOUT) :: n
-    COMPLEX(DP), INTENT(IN) :: psi(lda*npol,m) 
+    COMPLEX(DP), INTENT(IN) :: psi(lda*npol,m)
     !
     ! change to the EXX data strucutre
     !
@@ -646,7 +653,7 @@ MODULE exx_band
   !-----------------------------------------------------------------------
   SUBROUTINE transform_to_exx( lda, n, m, m_out, ik, psi, psi_out, type )
     !-----------------------------------------------------------------------
-    !! Transform psi into the EXX data structure, and place the result 
+    !! Transform psi into the EXX data structure, and place the result
     !! in psi_out.
     !
     USE wvfct,        ONLY : nbnd
@@ -958,9 +965,11 @@ MODULE exx_band
     USE cell_base,      ONLY : at, bg, tpiba2
     USE cellmd,         ONLY : lmovecell
     USE wvfct,          ONLY : npwx
-    USE gvect,          ONLY : gcutm, ig_l2g, g, gg, ngm, ngm_g, mill, mill_d, &
+    USE gvect,          ONLY : gcutm, ig_l2g, g, gg, ngm, ngm_g, mill, &
                                gstart, gvect_init, deallocate_gvect_exx, gshells
-    USE gvect,          ONLY : g_d, gg_d
+#if !defined(__OPENMP_GPU)
+    USE gvect,          ONLY : mill_d, g_d, gg_d
+#endif
     USE gvecs,          ONLY : gcutms, ngms, ngms_g, gvecs_init
     USE gvecw,          ONLY : gkcut, ecutwfc, gcutw
     USE klist,          ONLY : xk, nks, ngk
@@ -1073,6 +1082,7 @@ MODULE exx_band
        gg_d   = gg
 #endif
        !$acc update device(mill, g)
+       !$omp target update to(mill, g, gg)
        !
        allocate( ig_l2g_exx(ngm), g_exx(3,ngm), gg_exx(ngm) )
        allocate( mill_exx(3,ngm), nl_exx(ngm) )
@@ -1106,6 +1116,7 @@ MODULE exx_band
        gg_d   = gg
 #endif
        !$acc update device(mill, g)
+       !$omp target update to(mill, g, gg)
        !
        ! workaround: here dfft?%nl* are unallocated
        ! some compilers go on and allocate, some others crash
@@ -1115,10 +1126,22 @@ MODULE exx_band
        IF ( gamma_only .AND. .NOT.ALLOCATED(dfftp%nlm) ) ALLOCATE (dfftp%nlm_d(size(nlm_exx)))
        IF ( gamma_only .AND. .NOT.ALLOCATED(dffts%nlm) ) ALLOCATE (dffts%nlm_d(size(nlsm_exx)))
 #endif
-       IF ( .NOT. ALLOCATED(dfftp%nl) ) ALLOCATE (dfftp%nl(size(nl_exx)))
-       IF ( .NOT. ALLOCATED(dffts%nl) ) ALLOCATE (dffts%nl(size(nls_exx)))
-       IF ( gamma_only .AND. .NOT.ALLOCATED(dfftp%nlm) ) ALLOCATE (dfftp%nlm(size(nlm_exx)))
-       IF ( gamma_only .AND. .NOT.ALLOCATED(dffts%nlm) ) ALLOCATE (dffts%nlm(size(nlsm_exx)))
+       IF ( .NOT. ALLOCATED(dfftp%nl) ) THEN
+          ALLOCATE (dfftp%nl(size(nl_exx)))
+          !$omp target enter data map(alloc:dfftp%nl)
+       ENDIF
+       IF ( .NOT. ALLOCATED(dffts%nl) ) THEN
+          ALLOCATE (dffts%nl(size(nls_exx)))
+          !$omp target enter data map(alloc:dffts%nl)
+       ENDIF
+       IF ( gamma_only .AND. .NOT.ALLOCATED(dfftp%nlm) ) THEN
+          ALLOCATE (dfftp%nlm(size(nlm_exx)))
+          !$omp target enter data map(alloc:dfftp%nlm)
+       ENDIF
+       IF ( gamma_only .AND. .NOT.ALLOCATED(dffts%nlm) ) THEN
+          ALLOCATE (dffts%nlm(size(nlsm_exx)))
+          !$omp target enter data map(alloc:dffts%nlm)
+       ENDIF
 #if defined(__CUDA)
        IF ( .NOT. ALLOCATED(dfftp%nl_d) ) ALLOCATE (dfftp%nl_d(size(nl_exx)))
        IF ( .NOT. ALLOCATED(dffts%nl_d) ) ALLOCATE (dffts%nl_d(size(nls_exx)))
@@ -1128,6 +1151,7 @@ MODULE exx_band
        ! end workaround. FIXME: this part of code must disappear ASAP
        dfftp%nl = nl_exx
        dffts%nl = nls_exx
+       !$omp target update to(dfftp%nl, dffts%nl)
        ! workaround: create a helper subroutine to set nl from variables!!!
 #if defined(__CUDA)
        dfftp%nl_d = dfftp%nl
@@ -1136,6 +1160,7 @@ MODULE exx_band
        IF( gamma_only ) THEN
           dfftp%nlm = nlm_exx
           dffts%nlm = nlsm_exx
+          !$omp target update to(dfftp%nlm, dffts%nlm)
 #if defined(__CUDA)
           dfftp%nlm_d = dfftp%nlm
           dffts%nlm_d = dffts%nlm
@@ -1158,9 +1183,11 @@ MODULE exx_band
        gg_d   = gg
 #endif
        !$acc update device(mill, g)
+       !$omp target update to(mill, g, gg)
        !
        dfftp%nl = nl_loc
        dffts%nl = nls_loc
+       !$omp target update to(dfftp%nl, dffts%nl)
 #if defined(__CUDA)
        dfftp%nl_d = dfftp%nl
        dffts%nl_d = dffts%nl
@@ -1168,6 +1195,7 @@ MODULE exx_band
        IF( gamma_only ) THEN
           dfftp%nlm = nlm_loc
           dffts%nlm = nlsm_loc
+          !$omp target update to(dfftp%nlm, dffts%nlm)
 #if defined(__CUDA)
           dfftp%nlm_d = dfftp%nlm
           dffts%nlm_d = dffts%nlm
@@ -1210,7 +1238,13 @@ MODULE exx_band
        END IF
        DEALLOCATE( work_space )
 
-       IF(use_gpu) ALLOCATE(igk_exx_d, source=igk_exx)
+       IF(use_gpu) THEN
+#if defined(__OPENMP_GPU)
+          !$omp target enter data map(alloc:igk_exx)
+#else
+          ALLOCATE(igk_exx_d, source=igk_exx)
+#endif
+       ENDIF
 
     END IF
     !
@@ -1365,7 +1399,7 @@ MODULE exx_band
   !-----------------------------------------------------------------------
   SUBROUTINE transform_to_local( m, m_exx, psi, psi_out )
     !-----------------------------------------------------------------------
-    !! Transform psi into the local data structure, and place the result 
+    !! Transform psi into the local data structure, and place the result
     !! in psi_out.
     !
     USE mp,           ONLY : mp_sum

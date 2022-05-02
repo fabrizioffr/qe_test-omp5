@@ -13,11 +13,25 @@ SUBROUTINE g2_kin_gpu ( ik )
   !! kinetic energy functional for variable-cell calculations.
   !
   USE kinds,                ONLY : DP
-  USE cell_base,            ONLY : tpiba2 
+  USE cell_base,            ONLY : tpiba2
   USE gvecw,                ONLY : ecfixed, qcutz, q2sigma
-  USE klist,                ONLY : xk, ngk, igk_k_d
+  USE klist,                ONLY : xk, ngk, &
+#if !defined(__OPENMP_GPU)
+                                   igk_k_d
+#else
+                                   igk_k
+#endif
+  USE wvfct_gpum,           ONLY : &
+#if !defined(__OPENMP_GPU)
+                                   g2kin_d, &
+#endif
+                                   using_g2kin_d
+#if defined(__OPENMP_GPU)
+  USE gvect,                ONLY : g
+  USE wvfct,                ONLY : g2kin
+#else
   USE gvect,                ONLY : g_d
-  USE wvfct_gpum,           ONLY : g2kin_d, using_g2kin_d
+#endif
   !
   IMPLICIT NONE
   !
@@ -36,6 +50,7 @@ SUBROUTINE g2_kin_gpu ( ik )
   xk2 = xk(2,ik)
   xk3 = xk(3,ik)
   !
+#if defined(__CUDA)
 !$cuf kernel do(1) <<<*,*>>>
   DO i=1,npw
      g2kin_d(i) = ( ( xk1 + g_d(1,igk_k_d(i,ik)) )*( xk1 + g_d(1,igk_k_d(i,ik)) ) + &
@@ -43,9 +58,20 @@ SUBROUTINE g2_kin_gpu ( ik )
                   ( xk3 + g_d(3,igk_k_d(i,ik)) )*( xk3 + g_d(3,igk_k_d(i,ik)) ) ) * tpiba2
   !
   END DO
+#elif defined(__OPENMP_GPU)
+  !$omp target teams distribute parallel do
+  DO i=1,npw
+     g2kin(i) = ( ( xk1 + g(1,igk_k(i,ik)) )*( xk1 + g(1,igk_k(i,ik)) ) + &
+                  ( xk2 + g(2,igk_k(i,ik)) )*( xk2 + g(2,igk_k(i,ik)) ) + &
+                  ( xk3 + g(3,igk_k(i,ik)) )*( xk3 + g(3,igk_k(i,ik)) ) ) * tpiba2
+  !
+  END DO
+  !$omp end target teams distribute parallel do
+#endif
   !
   IF ( qcutz > 0.D0 ) THEN
      !
+#if defined(__CUDA)
 !$cuf kernel do(1) <<<*,*>>>
      DO ig = 1, npw
         !
@@ -53,6 +79,16 @@ SUBROUTINE g2_kin_gpu ( ik )
              ( 1.D0 + erf( ( g2kin_d(ig) - ecfixed ) / q2sigma ) )
         !
      END DO
+#elif defined(__OPENMP_GPU)
+  !$omp target teams distribute parallel do
+     DO ig = 1, npw
+        !
+        g2kin(ig) = g2kin(ig) + qcutz * &
+             ( 1.D0 + erf( ( g2kin(ig) - ecfixed ) / q2sigma ) )
+        !
+     END DO
+  !$omp end target teams distribute parallel do
+#endif
      !
   END IF
   !

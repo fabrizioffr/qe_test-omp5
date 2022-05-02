@@ -18,7 +18,11 @@ SUBROUTINE c_bands( iter )
   USE io_global,            ONLY : stdout
   USE io_files,             ONLY : iunhub, iunwfc, nwordwfc, nwordwfcU
   USE buffers,              ONLY : get_buffer, save_buffer, close_buffer
+#if !defined(__OPENMP_GPU)
   USE klist,                ONLY : nkstot, nks, ngk, igk_k, igk_k_d, xk
+#else
+  USE klist,                ONLY : nkstot, nks, ngk, igk_k, xk
+#endif
   USE uspp,                 ONLY : vkb, nkb
   USE gvect,                ONLY : g
   USE wvfct,                ONLY : et, nbnd, npwx, current_k
@@ -209,7 +213,11 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
   USE noncollin_module,     ONLY : npol
   USE wavefunctions,        ONLY : evc
   USE g_psi_mod,            ONLY : h_diag, s_diag
+#if !defined(__OPENMP_GPU)
   USE g_psi_mod_gpum,       ONLY : h_diag_d, s_diag_d, using_h_diag, using_s_diag, using_h_diag_d, using_s_diag_d
+#else
+  USE g_psi_mod_gpum,       ONLY : using_h_diag, using_s_diag, using_h_diag_d, using_s_diag_d
+#endif
   USE scf,                  ONLY : v_of_0
   USE bp,                   ONLY : lelfield, evcel, evcelp, evcelm, bec_evcel, &
                                    gdir, l3dstring, efield, efield_cry
@@ -221,9 +229,16 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
   USE mp,                   ONLY : mp_sum, mp_bcast
   USE xc_lib,               ONLY : exx_is_active
   USE gcscf_module,         ONLY : lgcscf
+#if !defined(__OPENMP_GPU)
   USE wavefunctions_gpum,   ONLY : evc_d, using_evc, using_evc_d
-  USE wvfct_gpum,           ONLY : et_d, using_et, using_et_d, &
-                                   g2kin_d, using_g2kin, using_g2kin_d
+#else
+  USE wavefunctions_gpum,   ONLY : using_evc, using_evc_d
+#endif
+  USE wvfct_gpum,           ONLY : using_et, using_et_d, &
+#if !defined(__OPENMP_GPU)
+                                   et_d, g2kin_d,        &
+#endif
+                                   using_g2kin, using_g2kin_d
   USE becmod_subs_gpum,     ONLY : using_becp_auto
   IMPLICIT NONE
   !
@@ -370,6 +385,7 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
           END FORALL
           !
           !$acc update self(vkb)
+          !$omp target update from(vkb)
           CALL usnldiag( npw, h_diag, s_diag )
        END IF
        !
@@ -387,7 +403,11 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
                    CALL rotate_wfc( npwx, npw, nbnd, gstart, nbnd, evc, npol, okvan, evc, et(1,ik) )
                 ELSE
                    CALL using_evc_d(1);  CALL using_et_d(1); ! et is used as intent(out), set intento=2?
+#if !defined(__OPENMP_GPU)
                    CALL rotate_wfc_gpu( npwx, npw, nbnd, gstart, nbnd, evc_d, npol, okvan, evc_d, et_d(1,ik) )
+#else
+                   CALL rotate_wfc_gpu( npwx, npw, nbnd, gstart, nbnd, evc, npol, okvan, evc, et(1,ik) )
+#endif
                 END IF
                 !
                 avg_iter = avg_iter + 1.D0
@@ -403,9 +423,15 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
                          ethr, max_cg_iter, .NOT. lscf, notconv, cg_iter )
              ELSE
                 CALL using_evc_d(1);  CALL using_et_d(1); CALL using_h_diag_d(0) ! precontidtion has intent(in)
+#if !defined(__OPENMP_GPU)
                 CALL rcgdiagg_gpu( hs_1psi_gpu, s_1psi_gpu, h_diag_d, &
                          npwx, npw, nbnd, evc_d, et_d(1,ik), btype(1,ik), &
                          ethr, max_cg_iter, .NOT. lscf, notconv, cg_iter )
+#else
+                CALL rcgdiagg_gpu( hs_1psi_gpu, s_1psi_gpu, h_diag, &
+                         npwx, npw, nbnd, evc, et(1,ik), btype(1,ik), &
+                         ethr, max_cg_iter, .NOT. lscf, notconv, cg_iter )
+#endif
              !
              END IF
              !
@@ -422,9 +448,15 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
                !
              ELSE
                CALL using_evc_d(1);  CALL using_et_d(1); CALL using_h_diag_d(0) ! precontidtion has intent(in)
+#if !defined(__OPENMP_GPU)
                CALL ppcg_gamma_gpu( h_psi_gpu, s_psi_gpu, okvan, h_diag_d, &
                            npwx, npw, nbnd, evc_d, et_d(1,ik), btype(1,ik), &
                            0.1d0*ethr, max_ppcg_iter, notconv, ppcg_iter, sbsize , rrstep, iter )
+#else
+               CALL ppcg_gamma_gpu( h_psi_gpu, s_psi_gpu, okvan, h_diag, &
+                           npwx, npw, nbnd, evc, et(1,ik), btype(1,ik), &
+                           0.1d0*ethr, max_ppcg_iter, notconv, ppcg_iter, sbsize , rrstep, iter )
+#endif
                !
                avg_iter = avg_iter + ppcg_iter
                !
@@ -440,9 +472,13 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
                ! write (6,*) ntry, avg_iter, nhpsi
                !
              ELSE
-               CALL using_evc_d(1);  CALL using_et_d(1); CALL using_h_diag_d(0) ! precontidtion has intent(in)
+               CALL using_evc(1);  CALL using_et(1); CALL using_h_diag(0) ! precontidtion has intent(in)
                CALL paro_gamma_new_gpu( h_psi_gpu, s_psi_gpu, hs_psi_gpu, g_1psi_gpu, okvan, &
+#if !defined(__OPENMP_GPU)
                           npwx, npw, nbnd, evc_d, et_d(1,ik), btype(1,ik), ethr, notconv, nhpsi )
+#else
+                          npwx, npw, nbnd, evc, et(1,ik), btype(1,ik), ethr, notconv, nhpsi )
+#endif
                !
                avg_iter = avg_iter + nhpsi/float(nbnd)
                ! write (6,*) ntry, avg_iter, nhpsi
@@ -459,6 +495,7 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
           !
        ENDDO CG_loop
        !
+#if !defined(__OPENMP_GPU)
     ELSE IF ( isolve == 4 .AND. .NOT. rmm_use_davidson(iter)) THEN
        !
        ! ... RMM-DIIS diagonalization
@@ -587,6 +624,7 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
           END IF
        END IF
        !
+#endif
     ELSE
        !
        ! ... Davidson diagonalization
@@ -609,11 +647,20 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
           !
           CALL using_g2kin_d(0)
           !$cuf kernel do(1)
+          !$omp target teams distribute parallel do
           DO j=1, npw
+#if !defined(__OPENMP_GPU)
              h_diag_d(j, 1) = g2kin_d(j) + v_of_0
+#else
+             h_diag(j, 1) = g2kin(j) + v_of_0
+#endif
           END DO
           !
+#if !defined(__OPENMP_GPU)
           CALL usnldiag_gpu( npw, h_diag_d, s_diag_d )
+#else
+          CALL usnldiag_gpu( npw, h_diag, s_diag)
+#endif
        END IF
        !
        ntry = 0
@@ -637,6 +684,7 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
              ! CALL using_evc(1) done above
           ELSE
              CALL using_evc_d(1); CALL using_et_d(1);
+#if !defined(__OPENMP_GPU)
              IF ( use_para_diag ) THEN
                 CALL pregterg_gpu( h_psi_gpu, s_psi_gpu, okvan, g_psi_gpu, &
                             npw, npwx, nbnd, nbndx, evc_d, ethr, &
@@ -648,6 +696,19 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
                          npw, npwx, nbnd, nbndx, evc_d, ethr, &
                          et_d(1, ik), btype(1,ik), notconv, lrot, dav_iter, nhpsi ) !    BEWARE gstart has been removed from call
              END IF
+#else
+             IF ( use_para_diag ) THEN
+                CALL pregterg_gpu( h_psi_gpu, s_psi_gpu, okvan, g_psi_gpu, &
+                            npw, npwx, nbnd, nbndx, evc, ethr, &
+                            et(1, ik), btype(1,ik), notconv, lrot, dav_iter, nhpsi ) !    BEWARE gstart has been removed from call
+                !
+             ELSE
+                !
+                CALL regterg_gpu (  h_psi_gpu, s_psi_gpu, okvan, g_psi_gpu, &
+                         npw, npwx, nbnd, nbndx, evc, ethr, &
+                         et(1, ik), btype(1,ik), notconv, lrot, dav_iter, nhpsi ) !    BEWARE gstart has been removed from call
+             END IF
+#endif
              ! CALL using_evc_d(1) ! done above
           END IF
           !
@@ -709,6 +770,7 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
           CALL allocate_bec_type( nkb, nbnd, bec_evcel )
           !
           !$acc update self(vkb)
+          !$omp target update from(vkb)
           CALL calbec( npw, vkb, evcel, bec_evcel )
           !
        ENDIF
@@ -737,6 +799,7 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
           END FORALL
           !
           !$acc update self(vkb)
+          !$omp target update from(vkb)
           CALL usnldiag( npw, h_diag, s_diag )
        ENDIF
        !
@@ -754,7 +817,11 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
                    CALL rotate_wfc( npwx, npw, nbnd, gstart, nbnd, evc, npol, okvan, evc, et(1,ik) )
                 ELSE
                    CALL using_evc_d(1); CALL using_et_d(1);
-                   CALL rotate_wfc_gpu( npwx, npw, nbnd, gstart, nbnd, evc_d, npol, okvan, evc_d, et_d(1,ik) )
+#if !defined(__OPENMP_GPU)
+                   CALL rotate_wfc_gpu( npwx, npw, nbnd, gstart, nbnd, evc, npol, okvan, evc_d, et_d(1,ik) )
+#else
+                   CALL rotate_wfc_gpu( npwx, npw, nbnd, gstart, nbnd, evc, npol, okvan, evc, et(1,ik) )
+#endif
                 END IF
                 !
                 avg_iter = avg_iter + 1.D0
@@ -769,9 +836,15 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
                          ethr, max_cg_iter, .NOT. lscf, notconv, cg_iter )
              ELSE
                 CALL using_evc_d(1); CALL using_et_d(1); CALL using_h_diag_d(0)
+#if !defined(__OPENMP_GPU)
                 CALL ccgdiagg_gpu( hs_1psi_gpu, s_1psi_gpu, h_diag_d, &
                          npwx, npw, nbnd, npol, evc_d, et_d(1,ik), btype(1,ik), &
                          ethr, max_cg_iter, .NOT. lscf, notconv, cg_iter )
+#else
+                CALL ccgdiagg_gpu( hs_1psi_gpu, s_1psi_gpu, h_diag, &
+                         npwx, npw, nbnd, npol, evc, et(1,ik), btype(1,ik), &
+                         ethr, max_cg_iter, .NOT. lscf, notconv, cg_iter )
+#endif
              END IF
              !
              avg_iter = avg_iter + cg_iter
@@ -789,9 +862,15 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
              ELSE
                CALL using_evc_d(1); CALL using_et_d(1); CALL using_h_diag_d(0)
                ! BEWARE npol should be added to the arguments
+#if !defined(__OPENMP_GPU)
                CALL ppcg_k_gpu( h_psi_gpu, s_psi_gpu, okvan, h_diag_d, &
                            npwx, npw, nbnd, npol, evc_d, et_d(1,ik), btype(1,ik), &
                            0.1d0*ethr, max_ppcg_iter, notconv, ppcg_iter, sbsize , rrstep, iter )
+#else
+               CALL ppcg_k_gpu( h_psi_gpu, s_psi_gpu, okvan, h_diag, &
+                           npwx, npw, nbnd, npol, evc, et(1,ik), btype(1,ik), &
+                           0.1d0*ethr, max_ppcg_iter, notconv, ppcg_iter, sbsize , rrstep, iter )
+#endif
                !
                avg_iter = avg_iter + ppcg_iter
                !
@@ -808,7 +887,11 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
              ELSE
                CALL using_evc_d(1); CALL using_et_d(1); CALL using_h_diag_d(0)
                CALL paro_k_new_gpu( h_psi_gpu, s_psi_gpu, hs_psi_gpu, g_1psi_gpu, okvan, &
+#if !defined(__OPENMP_GPU)
                         npwx, npw, nbnd, npol, evc_d, et_d(1,ik), btype(1,ik), ethr, notconv, nhpsi )
+#else
+                        npwx, npw, nbnd, npol, evc, et(1,ik), btype(1,ik), ethr, notconv, nhpsi )
+#endif
                !
                avg_iter = avg_iter + nhpsi/float(nbnd)
                ! write (6,*) ntry, avg_iter, nhpsi
@@ -823,6 +906,7 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
           !
        ENDDO CG_loop
        !
+#if !defined(__OPENMP_GPU)
     ELSE IF ( isolve == 4 .AND. .NOT. rmm_use_davidson(iter) )  THEN
        !
        ! ... RMM-DIIS diagonalization
@@ -952,6 +1036,7 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
        END IF
        !
        !
+#endif
     ELSE
        !
        ! ... Davidson diagonalization
@@ -979,14 +1064,23 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
           DO ipol = 1, npol
              !
              !$cuf kernel do(1)
+             !$omp target teams distribute parallel do
              DO j = 1, npw
+#if !defined(__OPENMP_GPU)
                 h_diag_d(j, ipol) = g2kin_d(j) + v_of_0
+#else
+                h_diag(j, ipol) = g2kin(j) + v_of_0
+#endif
              END DO
              !
           END DO
           !
           CALL using_s_diag_d(2); CALL using_h_diag_d(1)
+#if !defined(__OPENMP_GPU)
           CALL usnldiag_gpu( npw, h_diag_d, s_diag_d )
+#else
+          CALL usnldiag_gpu( npw, h_diag, s_diag)
+#endif
        END IF
        !
        ntry = 0
@@ -1011,6 +1105,7 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
              END IF
           ELSE
              CALL using_evc_d(1) ; CALL using_et_d(1)
+#if !defined(__OPENMP_GPU)
              IF ( use_para_diag ) then
                 !
                 CALL pcegterg_gpu( h_psi_gpu, s_psi_gpu, okvan, g_psi_gpu, &
@@ -1024,6 +1119,21 @@ SUBROUTINE diag_bands( iter, ik, avg_iter )
                                npw, npwx, nbnd, nbndx, npol, evc_d, ethr, &
                                et_d(1, ik), btype(1,ik), notconv, lrot, dav_iter, nhpsi )
              END IF
+#else
+             IF ( use_para_diag ) then
+                !
+                CALL pcegterg_gpu( h_psi_gpu, s_psi_gpu, okvan, g_psi_gpu, &
+                               npw, npwx, nbnd, nbndx, npol, evc, ethr, &
+                               et(1, ik), btype(1,ik), notconv, lrot, dav_iter, nhpsi )
+
+                !
+             ELSE
+                !
+                CALL cegterg_gpu ( h_psi_gpu, s_psi_gpu, okvan, g_psi_gpu, &
+                               npw, npwx, nbnd, nbndx, npol, evc, ethr, &
+                               et(1, ik), btype(1,ik), notconv, lrot, dav_iter, nhpsi )
+             END IF
+#endif
           END IF
           !
           avg_iter = avg_iter + dav_iter
@@ -1152,7 +1262,11 @@ SUBROUTINE c_bands_nscf( )
   USE io_files,             ONLY : iunhub, iunwfc, nwordwfc, nwordwfcU
   USE buffers,              ONLY : get_buffer, save_buffer, close_buffer
   USE basis,                ONLY : starting_wfc
+#if !defined(__OPENMP_GPU)
   USE klist,                ONLY : nkstot, nks, xk, ngk, igk_k, igk_k_d
+#else
+  USE klist,                ONLY : nkstot, nks, xk, ngk, igk_k
+#endif
   USE uspp,                 ONLY : vkb, nkb
   USE gvect,                ONLY : g
   USE wvfct,                ONLY : et, nbnd, npwx, current_k

@@ -211,7 +211,12 @@ SUBROUTINE init_wfc_gpu ( ik )
   USE constants,            ONLY : tpi
   USE basis,                ONLY : natomwfc, starting_wfc
   USE gvect,                ONLY : gstart
-  USE klist,                ONLY : xk, ngk, igk_k_d
+  USE klist,                ONLY : xk, ngk
+#if defined(__OPENMP_GPU)
+  USE klist,                ONLY : igk_k
+#else
+  USE klist,                ONLY : igk_k_d
+#endif
   USE wvfct,                ONLY : nbnd, npwx
   USE uspp,                 ONLY : nkb, okvan
   USE noncollin_module,     ONLY : npol
@@ -224,9 +229,18 @@ SUBROUTINE init_wfc_gpu ( ik )
   USE mp,                   ONLY : mp_bcast
   USE xc_lib,               ONLY : xclib_dft_is, stop_exx
   !
+#if defined(__OPENMP_GPU)
+  USE omp_lib
+  USE gvect,                ONLY : g
+  USE wavefunctions,        ONLY : evc
+  USE wavefunctions_gpum,   ONLY : using_evc_d
+  USE wvfct_gpum,           ONLY : et, using_et_d
+  USE mp,                   ONLY : mp_bcast_mapped
+#else
   USE gvect,                ONLY : g_d
   USE wavefunctions_gpum,   ONLY : evc_d, using_evc_d
   USE wvfct_gpum,           ONLY : et_d, using_et_d
+#endif
   USE becmod_subs_gpum,     ONLY : using_becp_auto, using_becp_d_auto
   USE control_flags,        ONLY : lscf
   !
@@ -270,7 +284,9 @@ SUBROUTINE init_wfc_gpu ( ik )
      !
   END IF
   !
+  !$omp allocate allocator(omp_target_device_mem_alloc)
   ALLOCATE( wfcatom_d( npwx, npol, n_starting_wfc ) )
+  !$omp allocate allocator(omp_target_device_mem_alloc)
   ALLOCATE(randy_d(2 * n_starting_wfc * npol * ngk(ik)))
   !
   IF ( n_starting_atomic_wfc > 0 ) THEN
@@ -289,6 +305,7 @@ SUBROUTINE init_wfc_gpu ( ik )
          !
          ngk_ik  = ngk(ik)
 !$cuf kernel do(3)
+!$omp target teams distribute parallel do collapse(3)
          DO ibnd = 1, n_starting_atomic_wfc
             !
             DO ipol = 1, npol
@@ -321,6 +338,7 @@ SUBROUTINE init_wfc_gpu ( ik )
   ngk_ik  = ngk(ik)
   xk_1 = xk(1,ik); xk_2 = xk(2,ik); xk_3 = xk(3,ik)
 !$cuf kernel do(3)
+!$omp target teams loop collapse(3)
   DO ibnd = n_starting_atomic_wfc + 1, n_starting_wfc
      !
      DO ipol = 1, npol
@@ -333,10 +351,17 @@ SUBROUTINE init_wfc_gpu ( ik )
               rr  = randy_d(rnd_idx)
               arg = tpi * randy_d(rnd_idx+1)
               !
+#if defined(__OPENMP_GPU)
+              rr = rr / ( ( xk_1 + g(1,igk_k(ig,ik)) )**2 + &
+                          ( xk_2 + g(2,igk_k(ig,ik)) )**2 + &
+                          ( xk_3 + g(3,igk_k(ig,ik)) )**2 + 1.0_DP )
+              wfcatom_d(ig,ipol,ibnd) = &
+#else
               rr = rr / ( ( xk_1 + g_d(1,igk_k_d(ig,ik)) )**2 + &
                           ( xk_2 + g_d(2,igk_k_d(ig,ik)) )**2 + &
                           ( xk_3 + g_d(3,igk_k_d(ig,ik)) )**2 + 1.0_DP )
               wfcatom_d(ig,ipol,ibnd) = &
+#endif
                    CMPLX( rr*COS( arg ), rr*SIN( arg ) ,kind=DP)
            ELSE
               wfcatom_d(ig,ipol,ibnd) = (0.0_dp, 0.0_dp)
@@ -358,6 +383,7 @@ SUBROUTINE init_wfc_gpu ( ik )
   !
   ! ... Diagonalize the Hamiltonian on the basis of atomic wfcs
   !
+  !$omp allocate allocator(omp_target_device_mem_alloc)
   ALLOCATE( etatom_d( n_starting_wfc ) )
   !
   ! ... Allocate space for <beta|psi>
@@ -379,7 +405,11 @@ SUBROUTINE init_wfc_gpu ( ik )
   IF ( xclib_dft_is('hybrid') .and. lscf  ) CALL stop_exx()
   CALL start_clock_gpu( 'wfcinit:wfcrot' ); !write(*,*) 'start wfcinit:wfcrot' ; FLUSH(6)
   CALL using_evc_d(2)  ! rotate_wfc_gpu (..., evc_d, etatom_d) -> evc : out (not specified)
+#if defined(__OPENMP_GPU)
+  CALL rotate_wfc_gpu ( npwx, ngk(ik), n_starting_wfc, gstart, nbnd, wfcatom_d, npol, okvan, evc, etatom_d )
+#else
   CALL rotate_wfc_gpu ( npwx, ngk(ik), n_starting_wfc, gstart, nbnd, wfcatom_d, npol, okvan, evc_d, etatom_d )
+#endif
   CALL stop_clock_gpu( 'wfcinit:wfcrot' ); !write(*,*) 'stop wfcinit:wfcrot' ; FLUSH(6)
   !
   lelfield = lelfield_save
@@ -389,8 +419,13 @@ SUBROUTINE init_wfc_gpu ( ik )
   !
   CALL using_et_d(2)
   !$cuf kernel do
+  !$omp target teams loop
   DO ibnd=1,nbnd
+#if defined(__OPENMP_GPU)
+     et(ibnd,ik) = etatom_d(ibnd)
+#else
      et_d(ibnd,ik) = etatom_d(ibnd)
+#endif
   END DO
   !
   CALL using_becp_auto (2)

@@ -4,8 +4,10 @@
 ! in the root directory of the present distribution,
 ! or http://www.gnu.org/copyleft/gpl.txt .
 !
+#if !defined(__OPENMP_GPU)
 #if defined(__USE_MANY_FFT)
 #error USE_MANY_FFT not implemented in the GPU version.
+#endif
 #endif
 !-----------------------------------------------------------------------------
 MODULE exx
@@ -23,6 +25,10 @@ MODULE exx
   USE control_flags,        ONLY : gamma_only, tqr, use_gpu, many_fft
   USE fft_types,            ONLY : fft_type_descriptor
   USE stick_base,           ONLY : sticks_map, sticks_map_deallocate
+#if defined(__OPENMP_GPU)
+  USE omp_lib
+  USE dmr
+#endif
   !
   IMPLICIT NONE
   !
@@ -30,6 +36,7 @@ MODULE exx
   !
   ! ... general purpose vars
   !
+  !$omp declare target(x_occupation, exxbuff)
   REAL(DP):: exxalfa=0._DP
   !! the parameter multiplying the exact-exchange part
   REAL(DP), ALLOCATABLE :: x_occupation(:,:)
@@ -49,9 +56,9 @@ MODULE exx
   !! buffer for matrix of localization integrals (K)
   !
   !! GPU duplicated data
+#if defined(__CUDA)
   COMPLEX(DP), ALLOCATABLE :: exxbuff_d(:,:,:)
   REAL(DP), ALLOCATABLE :: x_occupation_d(:,:)
-#if defined(__CUDA)
   attributes(DEVICE) :: x_occupation_d, exxbuff_d
 #endif
   !
@@ -114,6 +121,9 @@ MODULE exx
   !! starting buffer index used in bgrp parallelization
   INTEGER :: ibnd_buff_end
   !! ending buffer index used in bgrp parallelization
+#if defined(__OPENMP_GPU)
+  INTEGER :: omp_device
+#endif
   !
  CONTAINS
 #define _CX(A)  CMPLX(A,0._dp,kind=DP)
@@ -300,11 +310,21 @@ MODULE exx
     IF ( ALLOCATED(index_xk ) )    DEALLOCATE( index_xk  )
     IF ( ALLOCATED(index_sym) )    DEALLOCATE( index_sym )
     IF ( ALLOCATED(rir) )          DEALLOCATE( rir )
-    IF ( ALLOCATED(x_occupation) ) DEALLOCATE( x_occupation )
+    IF ( ALLOCATED(x_occupation) ) THEN
+       !$omp target exit data map(delete:x_occupation)
+       DEALLOCATE( x_occupation )
+    ENDIF
+#if !defined(__OPENMP_GPU)
     IF ( ALLOCATED(x_occupation_d) ) DEALLOCATE( x_occupation_d )
+#endif
     IF ( ALLOCATED(xkq_collect ) ) DEALLOCATE( xkq_collect  )
-    IF ( ALLOCATED(exxbuff) )      DEALLOCATE( exxbuff )
+    IF ( ALLOCATED(exxbuff) )      THEN
+       !$omp target exit data map(delete:exxbuff)
+       DEALLOCATE( exxbuff )
+    ENDIF
+#if !defined(__OPENMP_GPU)
     IF ( ALLOCATED(exxbuff_d) )    DEALLOCATE( exxbuff_d )
+#endif
     IF ( ALLOCATED(locbuff) )      DEALLOCATE( locbuff )
     IF ( ALLOCATED(locmat) )       DEALLOCATE( locmat )
     IF ( ALLOCATED(exxmat) )       DEALLOCATE( exxmat )
@@ -361,10 +381,10 @@ MODULE exx
                                      erfc_scrlen, gau_scrlen, exx_divergence
     USE exx_band,             ONLY : change_data_structure, nwordwfc_exx, &
                                      transform_evc_to_exx, igk_exx, evc_exx
-#if defined(__CUDA)
-    USE device_memcpy_m,      ONLY : dev_memset
+#if !defined(__OPENMP_GPU)
     USE device_fbuff_m,       ONLY : dev_buf
 #endif
+    USE devxlib_memset,       ONLY : dev_memset => devxlib_memory_set
     !
     IMPLICIT NONE
     !
@@ -387,9 +407,13 @@ MODULE exx
 !DIR$ memory(bandwidth) temppsic
 #endif
     COMPLEX(DP),ALLOCATABLE :: temppsic_nc(:,:), psic_nc(:,:)
+#if !defined(__OPENMP_GPU)
     COMPLEX(DP),POINTER     :: psic_nc_d(:,:)
 #if defined(__CUDA)
     attributes(DEVICE)      :: psic_nc_d
+#endif
+#else
+    INTEGER :: omp_device
 #endif
     COMPLEX(DP),ALLOCATABLE :: psic_exx(:)
     INTEGER :: nxxs, nrxxs
@@ -458,9 +482,15 @@ MODULE exx
                                              dfftt%nr1x, dfftt%nr2x, dfftt%nr3x )
     ! set occupations of wavefunctions used in the calculation of exchange term
     IF (.NOT. ALLOCATED(x_occupation)) ALLOCATE( x_occupation(nbnd,nkstot) )
+#if defined(__OPENMP_GPU)
+    IF (use_gpu) THEN
+       !$omp target enter data map(alloc:x_occupation)
+    ENDIF
+#else
     IF( .NOT. ALLOCATED(x_occupation_d) .and. use_gpu) &
         ALLOCATE( x_occupation_d(nbnd,nkstot) )
     ALLOCATE( occ(nbnd,nks) )
+#endif
     !
     DO ik = 1, nks
        IF (ABS(wk(ik)) > eps_occ) THEN
@@ -471,7 +501,13 @@ MODULE exx
     ENDDO
     !
     CALL poolcollect( nbnd, nks, occ, nkstot, x_occupation )
-    IF (use_gpu) x_occupation_d = x_occupation
+    IF (use_gpu) THEN
+#if defined(__OPENMP_GPU)
+       !$omp target update to(x_occupation)
+#else
+       x_occupation_d = x_occupation
+#endif
+    ENDIF
     !
     DEALLOCATE( occ )
     !
@@ -545,6 +581,11 @@ MODULE exx
                                           max_buff_bands_per_egrp-1,nkqs) )
          ENDIF
       ENDIF
+#if defined(__OPENMP_GPU)
+      IF (use_gpu) THEN
+         !$omp target enter data map(alloc:exxbuff)
+      ENDIF
+#else
       IF (.not. allocated(exxbuff_d) .and. use_gpu) THEN
          IF (gamma_only) THEN
             ALLOCATE( exxbuff_d(nrxxs*npol, ibnd_buff_start:ibnd_buff_start+max_buff_bands_per_egrp-1, nks))
@@ -552,6 +593,7 @@ MODULE exx
             ALLOCATE( exxbuff_d(nrxxs*npol, ibnd_buff_start:ibnd_buff_start+max_buff_bands_per_egrp-1, nkqs))
          END IF
       ENDIF
+#endif
     ENDIF
     !
     !assign buffer
@@ -569,16 +611,21 @@ MODULE exx
       ENDIF
     ELSE
        IF (use_gpu) THEN
-#if defined (__CUDA)
+#if defined(__OPENMP_GPU)
          ! NB: the array bounds are not passed to the subroutine.
          !
          ! See https://software.intel.com/en-us/forums/intel-fortran-compiler-for-linux-and-mac-os-x/topic/269311
          !
          ! NB: TO BE CORRECTED WITH THE NEW DeviceXlib LIBRARY that dues internal slicing right!
+         CALL dev_memset(exxbuff, (0.0_DP,0.0_DP), &
+                                  (/ 1,nrxxs*npol/), 1, &
+                                  (/ ibnd_buff_start, ibnd_buff_end /), ibnd_buff_start, &
+                                  (/ 1,SIZE(exxbuff,3)/), 1)
+#else
          CALL dev_memset(exxbuff_d, (0.0_DP,0.0_DP), &
-                                   (/ 1,nrxxs*npol/), 1, &
-                                   (/ ibnd_buff_start, ibnd_buff_end /), ibnd_buff_start, &
-                                   (/ 1,SIZE(exxbuff_d,3)/), 1)
+                                    (/ 1,nrxxs*npol/), 1, &
+                                    (/ ibnd_buff_start, ibnd_buff_end /), ibnd_buff_start, &
+                                    (/ 1,SIZE(exxbuff_d,3)/), 1)
 #endif
        ELSE
 !$omp parallel do collapse(3) default(shared) firstprivate(npol,nrxxs,nkqs, &
@@ -753,21 +800,31 @@ MODULE exx
 !$omp end parallel do
 #endif
                    !
-#if defined (__CUDA)
+#if defined(__OPENMP_GPU)
+                   IF (use_gpu) THEN
+                      !$omp target enter data map(alloc:psic_nc)
+                      !$omp target update to(psic_nc)
+                   ENDIF
+#else
                    IF (use_gpu) CALL dev_buf%lock_buffer(psic_nc_d, (/nrxxs, npol/), ierr)
                    IF (use_gpu) psic_nc_d = psic_nc
 #endif
                    !
                    IF (index_sym(ikq) > 0 ) THEN
                       IF (use_gpu) THEN
+#if !defined(__OPENMP_GPU)
                          associate(exxbuff=>exxbuff_d, psic_nc=>psic_nc_d)
+#endif
                          ! sym. op. without time reversal: normal case
                          !$cuf kernel do
+                         !$omp target teams distribute parallel do
                          DO ir=1,nrxxs
                             exxbuff(ir,ibnd,ikq)=psic_nc(ir,1)
                             exxbuff(ir+nrxxs,ibnd,ikq)=psic_nc(ir,2)
                          ENDDO
+#if !defined(__OPENMP_GPU)
                          end associate
+#endif
                       ELSE
                          ! sym. op. without time reversal: normal case
 !$omp parallel do default(shared) private(ir) firstprivate(ibnd,isym,ikq)
@@ -780,14 +837,19 @@ MODULE exx
                    ELSE
                       ! sym. op. with time reversal: spin 1->2*, 2->-1*
                       IF (use_gpu) THEN
+#if !defined(__OPENMP_GPU)
                          associate(exxbuff=>exxbuff_d, psic_nc=>psic_nc_d)
+#endif
                          ! sym. op. with time reversal: spin 1->2*, 2->-1*
                          !$cuf kernel do
+                         !$omp target teams distribute parallel do
                          DO ir=1,nrxxs
                             exxbuff(ir,ibnd,ikq)=CONJG(psic_nc(ir,2))
                             exxbuff(ir+nrxxs,ibnd,ikq)=-CONJG(psic_nc(ir,1))
                          ENDDO
+#if !defined(__OPENMP_GPU)
                          end associate
+#endif
                       ELSE
 !$omp parallel do default(shared) private(ir) firstprivate(ibnd,isym,ikq)
                       DO ir = 1, nrxxs
@@ -797,7 +859,12 @@ MODULE exx
 !$omp end parallel do
                       ENDIF
                    ENDIF
-#if defined(__CUDA)
+#if defined(__OPENMP_GPU)
+                IF (use_gpu) THEN
+                   !$omp target exit data map(delete:psic_nc)
+                   !$omp target update from(exxbuff)
+                ENDIF
+#else
                 IF (use_gpu) CALL dev_buf%release_buffer(psic_nc_d, ierr)
                 IF (use_gpu) exxbuff = exxbuff_d
 #endif
@@ -1341,10 +1408,11 @@ MODULE exx
     USE paw_exx,        ONLY : PAW_newdxx
     USE exx_base,       ONLY : nqs, index_xkq, index_xk, xkq_collect, &
          coulomb_fac, g2_convolution_all
-    USE exx_band,       ONLY : result_sum, igk_exx, igk_exx_d
-#if defined(__CUDA)
-    USE device_memcpy_m, ONLY : dev_memset
+    USE exx_band,        ONLY : result_sum, igk_exx
+#if !defined(__OPENMP_GPU)
+    USE exx_band,        ONLY : igk_exx_d
 #endif
+    USE devxlib_memset,  ONLY : dev_memset => devxlib_memory_set
     !
     !
     IMPLICIT NONE
@@ -1355,26 +1423,35 @@ MODULE exx
     TYPE(bec_type), OPTIONAL :: becpsi ! or call a calbec(...psi) instead
     !
     ! local variables
+#if !defined(__OPENMP_GPU)
     COMPLEX(DP), ALLOCATABLE :: psi_d(:,:)
     COMPLEX(DP), ALLOCATABLE :: hpsi_d(:,:)
 #if defined(__CUDA)
     attributes(DEVICE)       :: psi_d, hpsi_d
 #endif
+#endif
     COMPLEX(DP),ALLOCATABLE :: result(:,:)
+#if !defined(__OPENMP_GPU)
     COMPLEX(DP),ALLOCATABLE :: result_d(:,:)
 #if defined(__CUDA)
     attributes(DEVICE)       :: result_d
     attributes(PINNED)       :: result
 #endif
+#endif
     REAL(DP),ALLOCATABLE :: temppsic_dble (:)
     REAL(DP),ALLOCATABLE :: temppsic_aimag(:)
+#if !defined(__OPENMP_GPU)
     REAL(DP),ALLOCATABLE :: temppsic_dble_d (:)
     REAL(DP),ALLOCATABLE :: temppsic_aimag_d(:)
 #if defined(__CUDA)
     attributes(DEVICE)   :: temppsic_dble_d, temppsic_aimag_d
 #endif
+#endif
     !
-    COMPLEX(DP),ALLOCATABLE :: vc(:,:), deexx(:,:), vc_d(:,:)
+    COMPLEX(DP),ALLOCATABLE :: vc(:,:), deexx(:,:)
+#if !defined(__OPENMP_GPU)
+    COMPLEX(DP),ALLOCATABLE :: vc_d(:,:)
+#endif
     REAL(DP),   ALLOCATABLE :: fac(:)
 #if defined(__CUDA)
     attributes(DEVICE)   :: vc_d, fac
@@ -1389,18 +1466,22 @@ MODULE exx
     INTEGER, EXTERNAL :: global_kpoint_index
     INTEGER :: ialloc
     COMPLEX(DP), ALLOCATABLE :: big_result(:,:)
+#if !defined(__OPENMP_GPU)
     COMPLEX(DP), ALLOCATABLE :: big_result_d(:,:)
 #if defined(__CUDA)
     attributes(DEVICE) :: big_result_d
     attributes(PINNED) :: big_result
 #endif
+#endif
     INTEGER :: iproc, nproc_egrp, ii, ipair
     INTEGER :: jbnd, jstart, jend
     ! scratch space for fft of psi and rho
     COMPLEX(DP), ALLOCATABLE :: psi_rhoc_work(:)
+#if !defined(__OPENMP_GPU)
     COMPLEX(DP), ALLOCATABLE :: psi_rhoc_work_d(:)
 #if defined(__CUDA)
     attributes(DEVICE) :: psi_rhoc_work_d
+#endif
 #endif
     INTEGER :: jblock_start, jblock_end
     INTEGER :: iegrp, wegrp
@@ -1415,12 +1496,17 @@ MODULE exx
 #endif
     !
     ! CUDA Sync
+#if !defined(__OPENMP_GPU)
     dfftt__nl=>dfftt%nl_d
     dfftt__nlm=>dfftt%nlm_d
     ALLOCATE(psi_d, source=psi)
     ALLOCATE(hpsi_d, source=hpsi)
     !initial copy of exxbuff
     exxbuff_d = exxbuff
+#else
+    !$omp target enter data map(alloc:psi, hpsi)
+    !$omp target enter data map(to:exxbuff)
+#endif
     !
     ialloc = nibands(my_egrp_id+1)
     !
@@ -1429,26 +1515,41 @@ MODULE exx
     !
     !ALLOCATE( result(nrxxs), temppsic_dble(nrxxs), temppsic_aimag(nrxxs) )
     ALLOCATE( result(nrxxs,ialloc), temppsic_dble(nrxxs) )
+    ALLOCATE( temppsic_aimag(nrxxs) )
+#if defined(__OPENMP_GPU)
+    !$omp target enter data map(alloc:result, temppsic_dble, temppsic_aimag)
+#else
     ALLOCATE( result_d(nrxxs,ialloc))
     ALLOCATE( temppsic_dble_d(nrxxs) )
-    ALLOCATE( temppsic_aimag(nrxxs) )
     ALLOCATE( temppsic_aimag_d(nrxxs) )
+#endif
 
     ALLOCATE( psi_rhoc_work(nrxxs) )
-    ALLOCATE( psi_rhoc_work_d(nrxxs) )
-    !
     ALLOCATE( vc(nrxxs,ialloc))
+    !
+#if defined(__OPENMP_GPU)
+    !$omp target enter data map(alloc:psi_rhoc_work, vc)
+#else
+    ALLOCATE( psi_rhoc_work_d(nrxxs) )
     ALLOCATE( vc_d(nrxxs,ialloc))
+#endif
+    !
     IF(okvan) ALLOCATE(deexx(nkb,ialloc))
     !
     current_ik = global_kpoint_index ( nkstot, current_k )
     xkp = xk(:,current_k)
     !
     allocate(big_result(n,m))
+#if defined(__OPENMP_GPU)
+    !$omp target enter data map(alloc:big_result)
+#else
     allocate(big_result_d(n,m))
+#endif
     big_result = 0.0_DP
     result = 0.0_DP
-#if defined(__CUDA)
+#if defined(__OPENMP_GPU)
+    !$omp target update to(big_result, result)
+#else
     CALL dev_memset(big_result_d,  (0.0_DP, 0.0_DP))
     CALL dev_memset(result_d,  (0.0_DP, 0.0_DP))
 #endif
@@ -1487,16 +1588,24 @@ MODULE exx
              !
              IF ( mod(ii,2)==1 ) THEN
                 !
-#if defined(__CUDA)
+#if defined(__OPENMP_GPU)
+                CALL dev_memset(psi_rhoc_work, (0.0_DP,0.0_DP), (/ 1, nrxxs /), 1 )
+#else
                 CALL dev_memset(psi_rhoc_work_d, (0.0_DP,0.0_DP), (/ 1, nrxxs /), 1 )
 #endif
                 !
                 IF ( (ii+1)<=min(m,nibands(my_egrp_id+1)) ) THEN
                    ! deal with double bands
 !$cuf kernel do
+!$omp target teams distribute parallel do
                    DO ig = 1, npwt
+#if defined(__OPENMP_GPU)
+                      psi_rhoc_work( dfftt%nl(ig) )  =       psi(ig, ii) + (0._DP,1._DP) * psi(ig, ii+1)
+                      psi_rhoc_work( dfftt%nlm(ig) ) = conjg(psi(ig, ii) - (0._DP,1._DP) * psi(ig, ii+1))
+#else
                       psi_rhoc_work_d( dfftt__nl(ig) )  =       psi_d(ig, ii) + (0._DP,1._DP) * psi_d(ig, ii+1)
                       psi_rhoc_work_d( dfftt__nlm(ig) ) = conjg(psi_d(ig, ii) - (0._DP,1._DP) * psi_d(ig, ii+1))
+#endif
                    ENDDO
 
                 ENDIF
@@ -1504,18 +1613,35 @@ MODULE exx
                 IF ( ii==min(m,nibands(my_egrp_id+1)) ) THEN
                    ! deal with a single last band
 !$cuf kernel do
+!$omp target teams distribute parallel do
                    DO ig = 1, npwt
+#if defined(__OPENMP_GPU)
+                      psi_rhoc_work( dfftt%nl(ig) )  =       psi(ig,ii)
+                      psi_rhoc_work( dfftt%nlm(ig) ) = conjg(psi(ig,ii))
+#else
                       psi_rhoc_work_d( dfftt__nl(ig) )  =       psi_d(ig,ii)
                       psi_rhoc_work_d( dfftt__nlm(ig) ) = conjg(psi_d(ig,ii))
+#endif
                    ENDDO
                    !
                 ENDIF
                 !
+#if defined(__OPENMP_GPU)
+                !$omp dispatch is_device_ptr(psi_rhoc_work)
+                CALL invfft (2, psi_rhoc_work, dfftt)
+#else
                 CALL invfft (2, psi_rhoc_work_d, dfftt)
+#endif
 !$cuf kernel do
+!$omp target teams distribute parallel do
                 DO ir = 1, nrxxs
+#if defined(__OPENMP_GPU)
+                   temppsic_dble(ir)  = dble ( psi_rhoc_work(ir) )
+                   temppsic_aimag(ir) = aimag( psi_rhoc_work(ir) )
+#else
                    temppsic_dble_d(ir)  = dble ( psi_rhoc_work_d(ir) )
                    temppsic_aimag_d(ir) = aimag( psi_rhoc_work_d(ir) )
+#endif
                 ENDDO
                 !
              ENDIF
@@ -1567,14 +1693,24 @@ MODULE exx
                 !
                 IF( mod(ii,2) == 0 ) THEN
 !$cuf kernel do
+!$omp target teams distribute parallel do
                    DO ir = 1, nrxxs
+#if defined(__OPENMP_GPU)
+                      psi_rhoc_work(ir) = exxbuff(ir,exxbuff_index,ikq) * temppsic_aimag(ir) / omega
+#else
                       psi_rhoc_work_d(ir) = exxbuff_d(ir,exxbuff_index,ikq) * temppsic_aimag_d(ir) / omega
+#endif
                    ENDDO
 
                 ELSE
 !$cuf kernel do
+!$omp target teams distribute parallel do
                    DO ir = 1, nrxxs
+#if defined(__OPENMP_GPU)
+                      psi_rhoc_work(ir) = exxbuff(ir,exxbuff_index,ikq) * temppsic_dble(ir) / omega
+#else
                       psi_rhoc_work_d(ir) = exxbuff_d(ir,exxbuff_index,ikq) * temppsic_dble_d(ir) / omega
+#endif
                    ENDDO
 
                 ENDIF
@@ -1583,18 +1719,35 @@ MODULE exx
                 !
                 !   >>>> add augmentation in REAL SPACE here
                 IF(okvan .and. tqr) THEN
+#if defined(__OPENMP_GPU)
+                   !$omp target update from(psi_rhoc_work)
+#else
                    psi_rhoc_work = psi_rhoc_work_d
+#endif
                    IF(jbnd>=jstart) &
                         CALL addusxx_r(psi_rhoc_work, &
                        _CX(becxx(ikq)%r(:,jbnd)), _CX(becpsi%r(:,ibnd)))
                    IF(jbnd<jend) &
                         CALL addusxx_r(psi_rhoc_work, &
                        _CY(becxx(ikq)%r(:,jbnd+1)),_CX(becpsi%r(:,ibnd)))
+#if defined(__OPENMP_GPU)
+                   !$omp target update to(psi_rhoc_work)
+#else
                    psi_rhoc_work_d = psi_rhoc_work
+#endif
                 ENDIF
                 !
+#if defined(__OPENMP_GPU)
+                !$omp dispatch is_device_ptr(psi_rhoc_work)
+                CALL fwfft (1, psi_rhoc_work, dfftt)
+#else
                 CALL fwfft (1, psi_rhoc_work_d, dfftt)
+#endif
+#if defined(__OPENMP_GPU)
+                !$omp target update from(psi_rhoc_work)
+#else
                 psi_rhoc_work = psi_rhoc_work_d
+#endif
                 !   >>>> add augmentation in G SPACE here
                 IF(okvan .and. .not. tqr) THEN
                    ! contribution from one band added to real (in real space) part of rhoc
@@ -1605,25 +1758,44 @@ MODULE exx
                    IF(jbnd<jend) &
                         CALL addusxx_g(dfftt, psi_rhoc_work, xkq,  xkp, 'i', &
                         becphi_r=becxx(ikq)%r(:,jbnd+1), becpsi_r=becpsi%r(:,ibnd) )
+#if defined(__OPENMP_GPU)
+                   !$omp target update to(psi_rhoc_work)
+#else
                    psi_rhoc_work_d = psi_rhoc_work
+#endif
                 ENDIF
                 !   >>>> charge density done
                 !
                 vc(:,ii) = 0._DP
+#if defined(__OPENMP_GPU)
+                !$omp target update to(vc(:,ii))
+#else
                 vc_d(:,ii) = 0._DP
+#endif
                 fac(:) = coulomb_fac(:,iq,current_k)
+                !$omp target update to(fac)
                 !
 !$cuf kernel do
+!$omp target teams distribute parallel do
                 DO ig = 1, dfftt%ngm
                    !
+#if defined(__OPENMP_GPU)
+                   vc(dfftt__nl(ig),ii)  = fac(ig) * psi_rhoc_work(dfftt__nl(ig))
+                   vc(dfftt__nlm(ig),ii) = fac(ig) * psi_rhoc_work(dfftt__nlm(ig))
+#else
                    vc_d(dfftt__nl(ig),ii)  = fac(ig) * psi_rhoc_work_d(dfftt__nl(ig))
                    vc_d(dfftt__nlm(ig),ii) = fac(ig) * psi_rhoc_work_d(dfftt__nlm(ig))
+#endif
                    !
                 ENDDO
                 !
                 !   >>>>  compute <psi|H_fock G SPACE here
                 IF(okvan .and. .not. tqr) THEN
+#if defined(__OPENMP_GPU)
+                   !$omp target update from(vc(:,ii))
+#else
                    vc(:,ii) = vc_d(:,ii)
+#endif
                    IF(jbnd>=jstart) &
                         CALL newdxx_g(dfftt, vc(:,ii), xkq, xkp, 'r', deexx(:,ii), &
                            becphi_r=x1*becxx(ikq)%r(:,jbnd))
@@ -1633,11 +1805,20 @@ MODULE exx
                 ENDIF
                 !
                 !brings back v in real space
+#if defined(__OPENMP_GPU)
+                !$omp dispatch is_device_ptr(vc)
+                CALL invfft (1, vc(:,ii), dfftt)
+#else
                 CALL invfft (1, vc_d(:,ii), dfftt)
+#endif
                 !
                 !   >>>>  compute <psi|H_fock REAL SPACE here
                 IF(okvan .and. tqr) THEN
+#if defined(__OPENMP_GPU)
+                   !$omp target update from(vc(:,ii))
+#else
                    vc(:,ii) = vc_d(:,ii)
+#endif
                    IF(jbnd>=jstart) &
                         CALL newdxx_r(dfftt,vc(:,ii), _CX(x1*becxx(ikq)%r(:,jbnd)), deexx(:,ii))
                    IF(jbnd<jend) &
@@ -1656,10 +1837,17 @@ MODULE exx
                 ! accumulates over bands and k points
                 !
 !$cuf kernel do
+!$omp target teams distribute parallel do
                 DO ir = 1, nrxxs
+#if defined(__OPENMP_GPU)
+                   result(ir,ii) = result(ir,ii) &
+                                 + x1* dble(vc(ir,ii))* dble(exxbuff(ir,exxbuff_index,ikq)) &
+                                 + x2*aimag(vc(ir,ii))*aimag(exxbuff(ir,exxbuff_index,ikq))
+#else
                    result_d(ir,ii) = result_d(ir,ii) &
                                  + x1* dble(vc_d(ir,ii))* dble(exxbuff_d(ir,exxbuff_index,ikq)) &
                                  + x2*aimag(vc_d(ir,ii))*aimag(exxbuff_d(ir,exxbuff_index,ikq))
+#endif
                 ENDDO
                 !result(:,ii) = result_d(:,ii)
                 !
@@ -1670,7 +1858,14 @@ MODULE exx
           LOOP_ON_PSI_BANDS
           !
           ! get the next nbnd/negrp data
+#if defined(__OPENMP_GPU)
+          IF (negrp>1) then
+             !$omp dispatch is_device_ptr(exxbuff)
+             call mp_circular_shift_left( exxbuff(:,:,ikq), me_egrp, inter_egrp_comm )
+          ENDIF
+#else
           IF (negrp>1) call mp_circular_shift_left( exxbuff_d(:,:,ikq), me_egrp, inter_egrp_comm )
+#endif
           !
        ENDDO ! iegrp
        IF ( okvan .and..not.tqr ) CALL qvan_clean ()
@@ -1690,14 +1885,28 @@ MODULE exx
        !
        ! brings back result in G-space
        !
+#if defined (__OPENMP_GPU)
+       !$omp dispatch is_device_ptr(result)
+       CALL fwfft( 2 , result(:,ii), dfftt )
+#else
        CALL fwfft( 2 , result_d(:,ii), dfftt )
+#endif
        !result(:,ii) = result_d(:,ii)
        !communicate result
        !$cuf kernel do
+!$omp target teams distribute parallel do
        DO ig = 1, n
+#if defined(__OPENMP_GPU)
+          big_result(ig,ibnd) = big_result(ig,ibnd) - exxalfa*result(dfftt%nl(igk_exx(ig,current_k)),ii)
+#else
           big_result_d(ig,ibnd) = big_result_d(ig,ibnd) - exxalfa*result_d(dfftt__nl(igk_exx_d(ig,current_k)),ii)
+#endif
        END DO
+#if defined(__OPENMP_GPU)
+       !$omp target update from(big_result(:,ibnd))
+#else
        big_result(:,ibnd) = big_result_d(:,ibnd)
+#endif
        !
        ! add non-local \sum_I |beta_I> \alpha_Ii (the sum on i is outside)
        IF(okvan) CALL add_nlxx_pot (lda, big_result(:,ibnd), xkp, n, &
@@ -1720,15 +1929,22 @@ MODULE exx
        END DO
     END IF
     !
+    !$omp target exit data map(delete:big_result)
     DEALLOCATE(big_result)
+    !$omp target exit data map(delete:result, temppsic_dble, temppsic_aimag)
+    DEALLOCATE( result, temppsic_dble, temppsic_aimag)
+    !$omp target exit data map(delete:psi, hpsi)
+    !$omp target exit data map(delete:vc, psi_rhoc_work)
+    DEALLOCATE( vc,fac )
+    IF(okvan) DEALLOCATE( deexx )
+#if !defined(__OPENMP_GPU)
     DEALLOCATE(big_result_d)
-    DEALLOCATE( result, result_d, temppsic_dble, temppsic_aimag)
-    DEALLOCATE( temppsic_dble_d, temppsic_aimag_d)
+    DEALLOCATE( result_d, temppsic_dble_d, temppsic_aimag_d)
     DEALLOCATE( psi_rhoc_work_d)
     DEALLOCATE(psi_d, hpsi_d)
+    DEALLOCATE(vc_d)
+#endif
 
-    DEALLOCATE( vc, vc_d, fac )
-    IF(okvan) DEALLOCATE( deexx )
     !
     !-----------------------------------------------------------------------
   END SUBROUTINE vexx_gamma_gpu
@@ -2230,8 +2446,10 @@ MODULE exx
          coulomb_fac, g2_convolution_all
     USE exx_band,       ONLY : result_sum, igk_exx
     !CUDA stuff
+#if !defined(__OPENMP_GPU)
     USE mp_exx,         ONLY : iexx_istart_d
     USE exx_band,       ONLY : igk_exx_d
+#endif
     USE io_global,      ONLY : stdout
     !
     !
@@ -2240,33 +2458,43 @@ MODULE exx
     INTEGER                  :: lda, n, m
     COMPLEX(DP)              :: psi(:,:)
     COMPLEX(DP)              :: hpsi(:,:)
-    COMPLEX(DP),ALLOCATABLE  :: psi_d(:,:)
-    COMPLEX(DP),ALLOCATABLE  :: hpsi_d(:,:)
+    COMPLEX(DP), ALLOCATABLE :: psi_d(:,:)
+    COMPLEX(DP), ALLOCATABLE :: hpsi_d(:,:)
 #if defined(__CUDA)
-    attributes(DEVICE) :: psi_d, hpsi_d
+    attributes(DEVICE)       :: psi_d, hpsi_d
 #endif
     TYPE(bec_type), OPTIONAL :: becpsi ! or call a calbec(...psi) instead
     !
     ! local variables
-    COMPLEX(DP),ALLOCATABLE :: temppsic_d(:,:)
-    COMPLEX(DP),ALLOCATABLE :: temppsic_nc_d(:,:,:)
-    COMPLEX(DP),ALLOCATABLE :: result_d(:,:), result_nc_d(:,:,:)
+#if defined(__OPENMP_GPU)
+    COMPLEX(DP), POINTER     :: temppsic_d(:,:)
+    COMPLEX(DP), POINTER     :: temppsic_nc_d(:,:,:)
+    COMPLEX(DP), POINTER     :: result_d(:,:), result_nc_d(:,:,:)
+#else
+    COMPLEX(DP), ALLOCATABLE :: temppsic_d(:,:)
+    COMPLEX(DP), ALLOCATABLE :: temppsic_nc_d(:,:,:)
+    COMPLEX(DP), ALLOCATABLE :: result_d(:,:), result_nc_d(:,:,:)
+#endif
 #if defined(__CUDA)
     attributes(DEVICE) :: temppsic_d, temppsic_nc_d, result_d, result_nc_d
 #endif
     INTEGER          :: request_send, request_recv
     !
-    COMPLEX(DP),ALLOCATABLE :: deexx(:,:)
-    COMPLEX(DP),ALLOCATABLE,TARGET :: rhoc(:,:), vc(:,:)
-    COMPLEX(DP),ALLOCATABLE,TARGET :: rhoc_d(:,:), vc_d(:,:)
-    COMPLEX(DP),POINTER :: prhoc_d(:), pvc_d(:)
+    COMPLEX(DP), ALLOCATABLE :: deexx(:,:)
+    COMPLEX(DP), ALLOCATABLE, TARGET :: rhoc(:,:), vc(:,:)
+    COMPLEX(DP), POINTER :: prhoc_d(:), pvc_d(:)
+#if !defined(__OPENMP_GPU)
+    COMPLEX(DP), ALLOCATABLE, TARGET :: rhoc_d(:,:), vc_d(:,:)
 #if defined(__CUDA)
     attributes(DEVICE) :: rhoc_d, vc_d, prhoc_d, pvc_d
 #endif
+#endif
     REAL(DP), ALLOCATABLE :: fac(:), facb(:)
+#if !defined(__OPENMP_GPU)
     REAL(DP), ALLOCATABLE :: facb_d(:)
 #if defined(__CUDA)
     attributes(DEVICE) :: facb_d
+#endif
 #endif
     INTEGER  :: ibnd, ik, im , ikq, iq, ipol
     INTEGER  :: ir, ig, ir_start, ir_end
@@ -2279,9 +2507,11 @@ MODULE exx
     INTEGER, EXTERNAL :: global_kpoint_index
     DOUBLE PRECISION :: max, tempx
     COMPLEX(DP), ALLOCATABLE :: big_result(:,:)
+#if !defined(__OPENMP_GPU)
     COMPLEX(DP), ALLOCATABLE :: big_result_d(:,:)
 #if defined(__CUDA)
     attributes(DEVICE) :: big_result_d
+#endif
 #endif
     INTEGER :: ir_out, ipair, jbnd
     INTEGER :: ii, jstart, jend, jcount, jind, jcurr
@@ -2289,13 +2519,18 @@ MODULE exx
     INTEGER :: ijt, njt, jblock_start, jblock_end
     INTEGER :: iegrp, wegrp
     INTEGER :: all_start_tmp
+#if defined(__OPENMP_GPU)
+    INTEGER :: i, j
+#endif
     !hack around PGI bug
+#if !defined(__OPENMP_GPU)
     INTEGER, POINTER :: dfftt__nl(:)
 #if defined(__CUDA)
     attributes(DEVICE) :: dfftt__nl
 #endif
     !
     dfftt__nl=>dfftt%nl_d
+#endif
     !
     CALL start_clock( 'vexx_k_setup' )
 
@@ -2305,23 +2540,49 @@ MODULE exx
     nrxxs= dfftt%nnr
     ALLOCATE( facb(nrxxs) )
 
+#if defined(__OPENMP_GPU)
+    !$omp target enter data map(alloc:facb, psi, hpsi)
+#else
     ALLOCATE( psi_d, source=psi )
     ALLOCATE( hpsi_d, source=hpsi )
     ALLOCATE( facb_d(nrxxs) )
+#endif
 
     !initial copy of exxbuff
+#if defined(__OPENMP_GPU)
+    !$omp target update to(exxbuff)
+#else
     exxbuff_d = exxbuff
+#endif
     !
     IF (noncolin) THEN
+#if defined(__OPENMP_GPU)
+       !call omp_target_alloc_f(fptr_dev=result_nc_d, dimensions=[nrxxs,npol,ialloc], omp_dev=omp_device)
+
+       !temppsic_d knows where it is
+       !call omp_target_alloc_f(fptr_dev=temppsic_nc_d, dimensions=[nrxxs,npol,ialloc], omp_dev=omp_device)
+       !$omp allocate allocator(omp_target_device_mem_alloc)
+       ALLOCATE( result_nc_d(nrxxs,npol,ialloc), temppsic_nc_d(nrxxs,npol,ialloc) )
+#else
        ALLOCATE( result_nc_d(nrxxs,npol,ialloc) )
 
        !temppsic_d knows where it is
        ALLOCATE( temppsic_nc_d(nrxxs,npol,ialloc) )
+#endif
     ELSE
+#if defined(__OPENMP_GPU)
+       !call omp_target_alloc_f(fptr_dev=result_d, dimensions=[nrxxs,ialloc], omp_dev=omp_device)
+
+       !temppsic_d knows where it is
+       !call omp_target_alloc_f(fptr_dev=temppsic_d, dimensions=[nrxxs,ialloc], omp_dev=omp_device)
+       !$omp allocate allocator(omp_target_device_mem_alloc)
+       ALLOCATE( result_d(nrxxs,ialloc), temppsic_d(nrxxs,ialloc) )
+#else
        ALLOCATE( result_d(nrxxs,ialloc) )
 
        !temppsic_d knows
        ALLOCATE( temppsic_d(nrxxs,ialloc) )
+#endif
     ENDIF
     !
     IF(okvan) ALLOCATE(deexx(nkb,ialloc))
@@ -2331,12 +2592,20 @@ MODULE exx
     !
     allocate(big_result(n*npol,m))
     big_result = 0.0_DP
+#if defined(__OPENMP_GPU)
+    !$omp target enter data map(to:big_result)
+#else
     allocate(big_result_d(n*npol,m))
     big_result_d = 0.0_DP
+#endif
     !
     !allocate arrays for rhoc and vc
-    ALLOCATE(rhoc_d(nrxxs,jblock), vc_d(nrxxs,jblock))
     ALLOCATE(rhoc(nrxxs,jblock), vc(nrxxs,jblock))
+#if defined(__OPENMP_GPU)
+    !$omp target enter data map(alloc:rhoc, vc)
+#else
+    ALLOCATE(rhoc_d(nrxxs,jblock), vc_d(nrxxs,jblock))
+#endif
 
     !
 
@@ -2349,36 +2618,70 @@ MODULE exx
        IF(okvan) deexx(:,ii) = 0._DP
        !
        IF (noncolin) THEN
+#if defined(__OPENMP_GPU)
+          call omp_target_init(array=temppsic_nc_d(:,:,ii), val=(0.0_DP,0.0_DP), omp_dev=omp_device)
+#else
           temppsic_nc_d(:,:,ii) = 0._DP
+#endif
        ELSE
+#if defined(__OPENMP_GPU)
+          call omp_target_init(array=temppsic_d(:,ii), val=(0.0_DP,0.0_DP), omp_dev=omp_device)
+#else
           temppsic_d(:,ii) = 0._DP
+#endif
        END IF
        !
        IF (noncolin) THEN
           !$cuf kernel do (1)
+          !$omp target teams distribute parallel do
           DO ig = 1, n
+#if defined(__OPENMP_GPU)
+             temppsic_nc_d(dfftt%nl(igk_exx(ig,current_k)),1,ii) = psi(ig,ii)
+             temppsic_nc_d(dfftt%nl(igk_exx(ig,current_k)),2,ii) = psi(npwx+ig,ii)
+#else
              temppsic_nc_d(dfftt__nl(igk_exx_d(ig,current_k)),1,ii) = psi_d(ig,ii)
              temppsic_nc_d(dfftt__nl(igk_exx_d(ig,current_k)),2,ii) = psi_d(npwx+ig,ii)
+#endif
           ENDDO
+          !$omp dispatch is_device_ptr(temppsic_nc_d)
           CALL invfft (2, temppsic_nc_d(:,1,ii), dfftt)
+          !$omp dispatch is_device_ptr(temppsic_nc_d)
           CALL invfft (2, temppsic_nc_d(:,2,ii), dfftt)
        ELSE
           !$cuf kernel do (1)
+          !$omp target teams distribute parallel do
           DO ig = 1, n
+#if defined(__OPENMP_GPU)
+             temppsic_d( dfftt%nl(igk_exx(ig,current_k)), ii ) = psi(ig,ii)
+#else
              temppsic_d( dfftt__nl(igk_exx_d(ig,current_k)), ii ) = psi_d(ig,ii)
+#endif
           ENDDO
+          !$omp dispatch is_device_ptr(temppsic_nc_d)
           CALL invfft (2, temppsic_d(:,ii), dfftt)
        END IF
     END DO
-
+!
+#if defined(__OPENMP_GPU)
+    IF (noncolin) THEN
+       call omp_target_init(array=result_nc_d, val=(0.0_DP,0.0_DP), omp_dev=omp_device)
+    ELSE
+       call omp_target_init(array=result_d, val=(0.0_DP,0.0_DP), omp_dev=omp_device)
+    ENDIF
+#else
     IF (noncolin) THEN
        result_nc_d = 0.0_DP
     ELSE
        result_d = 0.0_DP
     ENDIF
+#endif
 
     ! no longer need psi_d
+#if defined(__OPENMP_GPU)
+    !$omp target exit data map(delete:psi)
+#else
     DEALLOCATE(psi_d)
+#endif
 
     !
     !precompute these guys
@@ -2404,7 +2707,11 @@ MODULE exx
        DO ig = 1, dfftt%ngm
           facb(dfftt%nl(ig)) = coulomb_fac(ig,iq,current_k)
        ENDDO
+#if defined(__OPENMP_GPU)
+       !$omp target update to(facb)
+#else
        facb_d = facb
+#endif
        !
        IF ( okvan .and..not.tqr ) CALL qvan_init (dfftt%ngm, xkq, xkp)
        !
@@ -2453,9 +2760,12 @@ MODULE exx
                 nblock=2048
                 nrt = (nrxxs+nblock-1)/nblock
                 !
+#if !defined(__OPENMP_GPU)
 associate(rhoc=>rhoc_d, exxbuff=>exxbuff_d)
+#endif
                 all_start_tmp=all_start(wegrp)
                 !$cuf kernel do (2)
+                !$omp target teams distribute parallel do collapse(2)
                 DO jbnd=jstart, jend
                    DO ir = 1, nrxxs
 
@@ -2471,7 +2781,9 @@ associate(rhoc=>rhoc_d, exxbuff=>exxbuff_d)
 
                    ENDDO
                 ENDDO
+#if !defined(__OPENMP_GPU)
 end associate
+#endif
                 !
                 !   >>>> add augmentation in REAL space HERE
                 IF(okvan .and. tqr) THEN ! augment the "charge" in real space
@@ -2484,74 +2796,160 @@ end associate
                 !
                 DO jbnd=jstart, jend, many_fft
                   jcurr = min(many_fft, jend-jbnd+1)
+#if defined(__OPENMP_GPU)
+                  !call omp_target_alloc_f(fptr_dev=prhoc_d, dimensions=[nrxxs*jcurr], omp_dev=omp_device)
+                  !$omp allocate allocator(omp_target_device_mem_alloc)
+                  allocate(prhoc_d(nrxxs*jcurr))
+                  !$omp target teams distribute parallel do
+                  do j=1,jcurr
+                     do i=1,nrxxs
+                        prhoc_d(nrxxs*(j-1)+i) = rhoc(i,jbnd-jstart+j)
+                     enddo
+                  enddo
+                  !$omp end target teams distribute parallel do
+#else
                   prhoc_d(1:nrxxs*jcurr) => rhoc_d(:,jbnd-jstart+1:jbnd-jstart+jcurr)
+#endif
+                  !$omp dispatch is_device_ptr(prhoc_d)
                   CALL fwfft (1, prhoc_d, dfftt, howmany=jcurr)
                 ENDDO
                 !
                 !   >>>> add augmentation in G space HERE
                 IF(okvan .and. .not. tqr) THEN
+#if defined(__OPENMP_GPU)
+                   !$omp target teams distribute parallel do
+                   do j=1,jcurr
+                      do i=1,nrxxs
+                         rhoc(i,jbnd-jstart+j) = prhoc_d(nrxxs*(j-1)+i)
+                      enddo
+                   enddo
+                   !$omp end target teams distribute parallel do
+                   !call omp_target_free_f(fptr_dev=prhoc_d, omp_dev=omp_device)
+                   deallocate(prhoc_d)
+                   !$omp target update from(rhoc)
+#else
                    rhoc = rhoc_d
+#endif
                    DO jbnd=jstart, jend
                       CALL addusxx_g(dfftt, rhoc(:,jbnd-jstart+1), xkq, xkp, &
                       'c', becphi_c=becxx(ikq)%k(:,jbnd),becpsi_c=becpsi%k(:,ibnd))
                    ENDDO
+#if defined(__OPENMP_GPU)
+                   !$omp target update to(rhoc)
+#else
                    rhoc_d = rhoc
+#endif
                 ENDIF
                 !   >>>> charge done
                 !
+#if !defined(__OPENMP_GPU)
 associate(vc=>vc_d, facb=>facb_d, rhoc=>rhoc_d, x_occupation=>x_occupation_d)
+#endif
                 !$cuf kernel do (2)
+                !$omp target teams distribute parallel do collapse(2)
                 DO jbnd=jstart, jend
                    DO ir = 1, nrxxs
                          vc(ir,jbnd-jstart+1) = facb(ir) * rhoc(ir,jbnd-jstart+1)*&
                                                 x_occupation(jbnd,ik) * nqs_inv
                    ENDDO
                 ENDDO
+#if !defined(__OPENMP_GPU)
 end associate
+#endif
                 !
                 ! Add ultrasoft contribution (RECIPROCAL SPACE)
                 ! compute alpha_I,j,k+q = \sum_J \int <beta_J|phi_j,k+q> V_i,j,k,q Q_I,J(r) d3r
                 IF(okvan .and. .not. tqr) THEN
+#if defined(__OPENMP_GPU)
+                   !$omp target update from(vc)
+#else
                    vc = vc_d
+#endif
                    DO jbnd=jstart, jend
                       CALL newdxx_g(dfftt, vc(:,jbnd-jstart+1), xkq, xkp, 'c',&
                                     deexx(:,ii), becphi_c=becxx(ikq)%k(:,jbnd))
                    ENDDO
+#if defined(__OPENMP_GPU)
+                   !$omp target update to(vc)
+#else
                    vc_d = vc
+#endif
                 ENDIF
                 !
                 !brings back v in real space
                 DO jbnd=jstart, jend, many_fft
                   jcurr = min(many_fft, jend-jbnd+1)
+#if defined(__OPENMP_GPU)
+                  !call omp_target_alloc_f(fptr_dev=pvc_d, dimensions=[nrxxs*jcurr], omp_dev=omp_device)
+                  !$omp allocate allocator(omp_target_device_mem_alloc)
+                  allocate(pvc_d(nrxxs*jcurr))
+                  !$omp target teams distribute parallel do
+                  do j=1,jcurr
+                     do i=1,nrxxs
+                        pvc_d(nrxxs*(j-1)+i) = vc(i,jbnd-jstart+j)
+                     enddo
+                  enddo
+                  !$omp end target teams distribute parallel do
+#else
                   pvc_d(1:nrxxs*jcurr) => vc_d(:,jbnd-jstart+1:jbnd-jstart+jcurr)
+#endif
+                  !$omp dispatch is_device_ptr(pvc_d)
                   CALL invfft (1, pvc_d, dfftt, howmany=jcurr)
                 ENDDO
                 !
                 ! Add ultrasoft contribution (REAL SPACE)
                 IF(okvan .and. tqr) THEN
+#if defined(__OPENMP_GPU)
+                   !$omp target teams distribute parallel do
+                   do j=1,jcurr
+                      do i=1,nrxxs
+                         vc(i,jbnd-jstart+j) = pvc_d(nrxxs*(j-1)+i)
+                      enddo
+                   enddo
+                   !$omp end target teams distribute parallel do
+                   !call omp_target_free_f(fptr_dev=pvc_d, omp_dev=omp_device)
+                   deallocate(pvc_d)
+                   !$omp target update from(vc)
+#else
                    vc = vc_d
+#endif
                    DO jbnd=jstart, jend
                       CALL newdxx_r(dfftt, vc(:,jbnd-jstart+1), becxx(ikq)%k(:,jbnd),deexx(:,ii))
                    ENDDO
+#if defined(__OPENMP_GPU)
+                   !$omp target update to(vc)
+#else
                    vc_d = vc
+#endif
                 ENDIF
                 !
                 ! Add PAW one-center contribution
                 IF(okpaw) THEN
+#if defined(__OPENMP_GPU)
+                   !$omp target update from(vc)
+#else
                    vc = vc_d
+#endif
                    DO jbnd=jstart, jend
                       CALL PAW_newdxx(x_occupation(jbnd,ik)/nqs, becxx(ikq)%k(:,jbnd), becpsi%k(:,ibnd), deexx(:,ii))
                    ENDDO
+#if defined(__OPENMP_GPU)
+                   !$omp target update to(vc)
+#else
                    vc_d = vc
+#endif
                 ENDIF
                 !
                 !accumulates over bands and k points
                 !
 
+#if !defined(__OPENMP_GPU)
 associate(exxbuff=>exxbuff_d, vc=>vc_d)
+#endif
                 all_start_tmp=all_start(wegrp)
                 DO jbnd=jstart, jend
                    !$cuf kernel do (1)
+                   !$omp target teams distribute parallel do
                    DO ir = 1, nrxxs
                       IF (noncolin) THEN
                          result_nc_d(ir,1,ii) = result_nc_d(ir,1,ii) &
@@ -2564,7 +2962,9 @@ associate(exxbuff=>exxbuff_d, vc=>vc_d)
                       ENDIF
                    ENDDO
                 ENDDO
+#if !defined(__OPENMP_GPU)
 end associate
+#endif
                 !
                 !----------------------------------------------------------------------!
                 !INNER LOOP END
@@ -2576,7 +2976,11 @@ end associate
           ! get the next nbnd/negrp data
           IF (negrp>1) THEN
              call mp_circular_shift_left( exxbuff(:,:,ikq), me_egrp, inter_egrp_comm )
+#if defined(__OPENMP_GPU)
+             !$omp target update to(exxbuff)
+#else
              exxbuff_d = exxbuff
+#endif
           ENDIF
           !
        END DO !iegrp
@@ -2604,22 +3008,40 @@ end associate
        !big_result_d=big_result !already initialized along with the big_result=1.0D0
        IF (noncolin) THEN
           !brings back result in G-space
+          !$omp dispatch is_device_ptr(result_nc_d)
           CALL fwfft (2, result_nc_d(:,1,ii), dfftt)
+          !$omp dispatch is_device_ptr(result_nc_d)
           CALL fwfft (2, result_nc_d(:,2,ii), dfftt)
           !$cuf kernel do (1)
+          !$omp target teams distribute parallel do
           DO ig = 1, n
+#if defined(__OPENMP_GPU)
+             big_result(  ig,ibnd) = big_result(  ig,ibnd) - exxalfa*result_nc_d(dfftt%nl(igk_exx(ig,current_k)),1,ii)
+             big_result(n+ig,ibnd) = big_result(n+ig,ibnd) - exxalfa*result_nc_d(dfftt%nl(igk_exx(ig,current_k)),2,ii)
+#else
              big_result_d(ig,ibnd) = big_result_d(ig,ibnd) - exxalfa*result_nc_d(dfftt__nl(igk_exx_d(ig,current_k)),1,ii)
              big_result_d(n+ig,ibnd) = big_result_d(n+ig,ibnd) - exxalfa*result_nc_d(dfftt__nl(igk_exx_d(ig,current_k)),2,ii)
+#endif
           ENDDO
        ELSE
           !
+          !$omp dispatch is_device_ptr(result_nc_d)
           CALL fwfft (2, result_d(:,ii), dfftt)
           !$cuf kernel do (1)
+          !$omp target teams distribute parallel do
           DO ig = 1, n
+#if defined(__OPENMP_GPU)
+             big_result  (ig,ibnd) = big_result  (ig,ibnd) - exxalfa*result_d(dfftt%nl (igk_exx  (ig,current_k)),ii)
+#else
              big_result_d(ig,ibnd) = big_result_d(ig,ibnd) - exxalfa*result_d(dfftt__nl(igk_exx_d(ig,current_k)),ii)
+#endif
           ENDDO
        ENDIF
+#if defined(__OPENMP_GPU)
+       !$omp target update from(big_result(:,ibnd))
+#else
        big_result(:,ibnd) = big_result_d(:,ibnd)
+#endif
 
        IF(okvan) CALL add_nlxx_pot (lda, big_result(:,ibnd), xkp, n, igk_exx(:,current_k),&
             deexx(:,ii), eps_occ, exxalfa)
@@ -2628,19 +3050,34 @@ end associate
 
     ! add non-local \sum_I |beta_I> \alpha_Ii (the sum on i is outside)
     !deallocate temporary arrays
+    !$omp target exit data map(delete:rhoc, vc)
     DEALLOCATE(rhoc, vc)
     IF (noncolin) THEN
+!#if defined(__OPENMP_GPU)
+!       call omp_target_free_f(fptr_dev=result_nc_d, omp_dev=omp_device)
+!#else
        DEALLOCATE( result_nc_d )
+!#endif
     ELSE
+!#if defined(__OPENMP_GPU)
+!       call omp_target_free_f(fptr_dev=result_d, omp_dev=omp_device)
+!#else
        DEALLOCATE( result_d )
+!#endif
     ENDIF
 
     !dealloc stuff
+#if !defined(__OPENMP_GPU)
     DEALLOCATE(rhoc_d, vc_d)
+#endif
     !
     !sum result
     CALL result_sum(n*npol, m, big_result)
+#if defined(__OPENMP_GPU)
+    !$omp target update to(big_result)
+#else
     big_result_d = big_result
+#endif
     IF (iexx_istart(my_egrp_id+1).gt.0) THEN
        IF (negrp == 1) then
           ending_im = m
@@ -2651,39 +3088,65 @@ end associate
        !iexx_istart_d=iexx_istart
        IF(noncolin) THEN
           !$cuf kernel do (2)
-          DO im=1, ending_im
+          !$omp target teams distribute parallel do collapse(2)
+         DO im=1, ending_im
              DO ig = 1, n
+#if defined(__OPENMP_GPU)
+                hpsi(ig,im)     = hpsi(ig,im)     + big_result(  ig,im+iexx_istart(my_egrp_id+1)-1)
+                hpsi(lda+ig,im) = hpsi(lda+ig,im) + big_result(n+ig,im+iexx_istart(my_egrp_id+1)-1)
+#else
                 hpsi_d(ig,im) = hpsi_d(ig,im) + big_result_d(ig,im+iexx_istart_d(my_egrp_id+1)-1)
                 hpsi_d(lda+ig,im) = hpsi_d(lda+ig,im) + big_result_d(n+ig,im+iexx_istart_d(my_egrp_id+1)-1)
+#endif
              ENDDO
           END DO
        ELSE
           !$cuf kernel do (2)
+          !$omp target teams distribute parallel do collapse(2)
           DO im=1, ending_im
              DO ig = 1, n
+#if defined(__OPENMP_GPU)
+                hpsi  (ig,im) = hpsi  (ig,im) + big_result  (ig,im+iexx_istart  (my_egrp_id+1)-1)
+#else
                 hpsi_d(ig,im) = hpsi_d(ig,im) + big_result_d(ig,im+iexx_istart_d(my_egrp_id+1)-1)
+#endif
              ENDDO
           ENDDO
        END IF
     END IF
+#if defined(__OPENMP_GPU)
+    !$omp target update from(hpsi)
+#else
     hpsi=hpsi_d
+#endif
 
     !these need to be deallocated anyhow
+    !$omp target exit data map(delete:big_result, facb, hpsi)
     DEALLOCATE(big_result)
 
     DEALLOCATE(fac, facb )
 
     IF (noncolin) THEN
+!#if defined(__OPENMP_GPU)
+!       call omp_target_free_f(fptr_dev=temppsic_nc_d, omp_dev=omp_device)
+!#else
        DEALLOCATE(temppsic_nc_d)
+!#endif
     ELSE
+!#if defined(__OPENMP_GPU)
+!       call omp_target_free_f(fptr_dev=temppsic_d, omp_dev=omp_device)
+!#else
        DEALLOCATE(temppsic_d)
+!#endif
     ENDIF
 
     IF(okvan) DEALLOCATE( deexx)
 
+#if !defined(__OPENMP_GPU)
     DEALLOCATE(big_result_d)
     DEALLOCATE(facb_d)
     DEALLOCATE(hpsi_d)
+#endif
     !
     CALL stop_clock( 'vexx_k_fin' )
     !

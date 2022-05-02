@@ -16,7 +16,10 @@ SUBROUTINE matcalc_k_gpu (label, DoE, PrtMat, ik, ninner, n, m, U, V, mat, ee)
   USE kinds,                ONLY : dp
   USE io_global,ONLY : stdout
   USE wvfct,                ONLY : wg, npwx
-  USE wvfct_gpum,           ONLY : using_wg_d,wg_d
+  USE wvfct_gpum,           ONLY : using_wg_d
+#if !defined(__OPENMP_GPU)
+  USE wvfct_gpum,           ONLY : wg_d
+#endif
   USE becmod_subs_gpum,     ONLY : calbec_gpu
   USE noncollin_module,     ONLY : noncolin, npol
   IMPLICIT NONE
@@ -54,9 +57,14 @@ SUBROUTINE matcalc_k_gpu (label, DoE, PrtMat, ik, ninner, n, m, U, V, mat, ee)
     IF( PrtMat > 1 ) CALL errore("matcalc_k_gpu", "matcalc_k_gpu cannot print matrix", 1)
     string = 'E-'
     ee = 0.0_dp
-    !$cuf kernel do (1) 
+    !$cuf kernel do (1)
+    !$omp target teams distribute parallel do
     DO i = 1,n
+#if defined(__OPENMP_GPU)
+      ee = ee + wg(i,ik)*DBLE(mat(i,i))
+#else
       ee = ee + wg_d(i,ik)*DBLE(mat(i,i))
+#endif
     ENDDO
     IF ( PrtMat > 0 ) WRITE(stdout,'(A,f16.8,A)') string//label, ee, ' Ry'
   ENDIF
@@ -64,4 +72,3 @@ SUBROUTINE matcalc_k_gpu (label, DoE, PrtMat, ik, ninner, n, m, U, V, mat, ee)
   CALL stop_clock_gpu('matcalc')
 
 END SUBROUTINE matcalc_k_gpu
-

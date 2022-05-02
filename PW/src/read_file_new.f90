@@ -113,7 +113,7 @@ SUBROUTINE read_file_new ( needwf )
      wfc_dir = tmp_dir ! this is likely obsolete and no longer used
      !
      ! ... distribute across pools k-points and related variables.
-     ! ... nks is defined by the following routine as the number 
+     ! ... nks is defined by the following routine as the number
      ! ... of k-points in the current pool
      !
      CALL divide_et_impera( nkstot, xk, wk, isk, nks )
@@ -121,7 +121,7 @@ SUBROUTINE read_file_new ( needwf )
      CALL poolscatter( nbnd, nkstot, et, nks, et )
      CALL using_wg(1)
      CALL poolscatter( nbnd, nkstot, wg, nks, wg )
-#if defined(__CUDA)
+#if defined(__CUDA) || defined(__OPENMP_GPU)
      ! Updating wg here. Should not be done and will be removed ASAP.
      CALL using_wg_d(0)
 #endif
@@ -155,13 +155,17 @@ SUBROUTINE post_xml_init (  )
   USE ldaU,                 ONLY : lda_plus_u, eth, init_lda_plus_u, U_projection, &
                                    lda_plus_u_kind
   USE esm,                  ONLY : do_comp_esm, esm_init
-  USE Coul_cut_2D,          ONLY : do_cutoff_2D, cutoff_fact 
+  USE Coul_cut_2D,          ONLY : do_cutoff_2D, cutoff_fact
   USE ions_base,            ONLY : nat, nsp, tau, ityp
   USE cell_base,            ONLY : omega
   USE recvec_subs,          ONLY : ggen, ggens
-  USE gvect,                ONLY : ecutrho, gg, ngm, g, gcutm, mill, mill_d, &
-          ngm_g, ig_l2g, eigts1, eigts2, eigts3, gstart, gshells, g_d, gg_d
-  USE gvecs,                ONLY : ngms, gcutms 
+#if defined(__OPENMP_GPU)
+  USE gvect,                ONLY : ecutrho, gg, ngm, g, gcutm, mill, &
+          ngm_g, ig_l2g, eigts1, eigts2, eigts3, gstart, gshells
+#else
+  USE gvect,                ONLY : mill_d, g_d, gg_d
+#endif
+  USE gvecs,                ONLY : ngms, gcutms
   USE gvecw,                ONLY : ecutwfc
   USE fft_rho,              ONLY : rho_g2r
   USE fft_base,             ONLY : dfftp, dffts
@@ -214,7 +218,7 @@ SUBROUTINE post_xml_init (  )
   CALL data_structure ( gamma_only )
   CALL allocate_fft()
   CALL ggen ( dfftp, gamma_only, at, bg, gcutm, ngm_g, ngm, &
-       g, gg, mill, ig_l2g, gstart ) 
+       g, gg, mill, ig_l2g, gstart )
 #if defined(__CUDA)
   ! FIXME: to be moved inside ggen
   mill_d = mill
@@ -222,9 +226,10 @@ SUBROUTINE post_xml_init (  )
   gg_d   = gg
 #endif
   !$acc update device(mill, g)
+  !$omp target update to(mill, g, gg)
   !
-  CALL ggens( dffts, gamma_only, at, g, gg, mill, gcutms, ngms ) 
-  CALL gshells ( lmovecell ) 
+  CALL ggens( dffts, gamma_only, at, g, gg, mill, gcutms, ngms )
+  CALL gshells ( lmovecell )
   !
   IF (do_comp_esm) CALL esm_init()
   IF (do_cutoff_2D) CALL cutoff_fact()
@@ -268,7 +273,7 @@ SUBROUTINE post_xml_init (  )
   IF (real_space ) THEN
      CALL betapointlist()
      CALL init_realspace_vars()
-     WRITE (stdout,'(5X,"Real space initialisation completed")')    
+     WRITE (stdout,'(5X,"Real space initialisation completed")')
   ENDIF
   !
   ! ... recalculate the potential - FIXME: couldn't make ts-vdw work
@@ -288,7 +293,7 @@ SUBROUTINE post_xml_init (  )
   IF (okpaw) THEN
      becsum = rho%bec
      CALL PAW_potential(rho%bec, ddd_PAW)
-  ENDIF 
+  ENDIF
   CALL newd()
   !
   RETURN

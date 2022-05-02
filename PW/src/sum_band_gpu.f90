@@ -408,8 +408,6 @@ SUBROUTINE sum_band_gpu()
           !
           CALL start_clock_gpu( 'sum_band:init_us_2' )
           !
-          IF ( nkb > 0 ) CALL using_vkb_d(2)
-          !
           IF ( nkb > 0 ) CALL init_us_2( npw, igk_k(1,ik), xk(1,ik), vkb )
           !
           CALL stop_clock_gpu( 'sum_band:init_us_2' )

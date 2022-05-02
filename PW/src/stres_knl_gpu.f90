@@ -11,26 +11,34 @@ SUBROUTINE stres_knl_gpu( sigmanlc, sigmakin )
   !-----------------------------------------------------------------------
   !! Computes the kinetic + nonlocal contribuition to the stress
   !
-  USE kinds,                ONLY: DP
-  USE constants,            ONLY: pi, e2
-  USE cell_base,            ONLY: omega, alat, at, bg, tpiba
-  USE gvect,                ONLY: g, g_d
-  USE gvecw,                ONLY: qcutz, ecfixed, q2sigma
-  USE klist,                ONLY: nks, xk, ngk, igk_k_d
-  USE io_files,             ONLY: iunwfc, nwordwfc
-  USE buffers,              ONLY: get_buffer
-  USE symme,                ONLY: symmatrix
-  USE wvfct,                ONLY: npwx, nbnd, wg
-  USE control_flags,        ONLY: gamma_only, use_gpu
-  USE noncollin_module,     ONLY: noncolin, npol
-  USE wavefunctions,        ONLY: evc
-  USE mp_pools,             ONLY: inter_pool_comm
-  USE mp_bands,             ONLY: intra_bgrp_comm
-  USE mp,                   ONLY: mp_sum
-#if defined(__CUDA) 
-  USE wavefunctions_gpum,   ONLY: using_evc, using_evc_d, evc_d  
-  USE device_fbuff_m,       ONLY : dev_buf
-#endif   
+  USE kinds,                ONLY : DP
+  USE constants,            ONLY : pi, e2
+  USE cell_base,            ONLY : omega, alat, at, bg, tpiba
+  USE gvect,                ONLY : g
+#if !defined(__OPENMP_GPU)
+  USE gvect,                ONLY: g_d
+  USE klist,                ONLY : nks, xk, ngk, igk_k_d
+#else
+  USE klist,                ONLY : nks, xk, ngk, igk_k
+#endif
+  USE gvecw,                ONLY : qcutz, ecfixed, q2sigma
+  USE io_files,             ONLY : iunwfc, nwordwfc
+  USE buffers,              ONLY : get_buffer
+  USE symme,                ONLY : symmatrix
+  USE wvfct,                ONLY : npwx, nbnd, wg
+  USE control_flags,        ONLY : gamma_only, use_gpu
+  USE noncollin_module,     ONLY : noncolin, npol
+  USE wavefunctions,        ONLY : evc
+  USE mp_pools,             ONLY : inter_pool_comm
+  USE mp_bands,             ONLY : intra_bgrp_comm
+  USE mp,                   ONLY : mp_sum
+#if defined(__CUDA)
+  USE wavefunctions_gpum,   ONLY : using_evc, using_evc_d, evc_d
+  USE devxlib_buffers,      ONLY : dev_buf => gpu_buffer
+#elif defined(__OPENMP_GPU)
+  USE wavefunctions_gpum,   ONLY : using_evc, using_evc_d
+  USE devxlib_buffers,      ONLY : dev_buf => gpu_buffer
+#endif
   !
   IMPLICIT NONE
   !
@@ -43,13 +51,15 @@ SUBROUTINE stres_knl_gpu( sigmanlc, sigmakin )
   !
   REAL(DP), POINTER :: gk_d(:,:), kfac_d (:)
   REAL(DP) :: twobysqrtpi, gk2, arg, s11, s21, s31, s22, s32, s33, &
-              xk1, xk2, xk3, tmpf, wg_nk 
+              xk1, xk2, xk3, tmpf, wg_nk
   INTEGER  :: npw, ik, l, m, i, ibnd, is
   INTEGER  :: ierr(2)
   !
-#if defined(__CUDA) 
-  ATTRIBUTES(DEVICE)  :: gk_d, kfac_d 
+#if defined(__CUDA)
+  ATTRIBUTES(DEVICE)  :: gk_d, kfac_d
+#endif
   !
+#if defined(__CUDA) || defined(__OPENMP_GPU)
   CALL using_evc(0)
   CALL using_evc_d(0)
   !
@@ -71,7 +81,7 @@ SUBROUTINE stres_knl_gpu( sigmanlc, sigmakin )
         CALL get_buffer( evc, nwordwfc, iunwfc, ik )
         CALL using_evc(2)
         CALL using_evc_d(0)
-     ENDIF 
+     ENDIF
      !
      npw = ngk(ik)
      !
@@ -80,10 +90,17 @@ SUBROUTINE stres_knl_gpu( sigmanlc, sigmakin )
      xk3 = xk(3,ik)
      !
      !$cuf kernel do(1) <<<*,*>>>
+     !$omp target teams distribute parallel do
      DO i = 1, npw
+#if defined(__OPENMP_GPU)
+        gk_d(i,1) = ( xk1 + g(1,igk_k(i,ik)) ) * tpiba
+        gk_d(i,2) = ( xk2 + g(2,igk_k(i,ik)) ) * tpiba
+        gk_d(i,3) = ( xk3 + g(3,igk_k(i,ik)) ) * tpiba
+#else
         gk_d(i,1) = ( xk1 + g_d(1,igk_k_d(i,ik)) ) * tpiba
         gk_d(i,2) = ( xk2 + g_d(2,igk_k_d(i,ik)) ) * tpiba
         gk_d(i,3) = ( xk3 + g_d(3,igk_k_d(i,ik)) ) * tpiba
+#endif
         IF (qcutz > 0._DP) THEN
            gk2 = gk_d(i,1)**2 + gk_d(i,2)**2 + gk_d(i,3)**2
            arg = ( (gk2-ecfixed)/q2sigma )**2
@@ -96,14 +113,30 @@ SUBROUTINE stres_knl_gpu( sigmanlc, sigmakin )
      DO ibnd = 1, nbnd
         wg_nk = wg(ibnd,ik)
         !$cuf kernel do(1) <<<*,*>>>
+        !$omp target teams distribute parallel do reduction(+:s11) &
+        !$omp &                                   reduction(+:s21) &
+        !$omp &                                   reduction(+:s22) &
+        !$omp &                                   reduction(+:s31) &
+        !$omp &                                   reduction(+:s32) &
+        !$omp &                                   reduction(+:s33) &
+        !$omp & map(tofrom:s11, s21, s22, s31, s32, s33)
         DO i = 1, npw
            IF (noncolin) THEN
               tmpf = wg_nk * kfac_d(i) * &
+#if defined(__OPENMP_GPU)
+               ( DBLE(CONJG(evc(   i  ,ibnd))*evc(   i  ,ibnd)) + &
+                 DBLE(CONJG(evc(i+npwx,ibnd))*evc(i+npwx,ibnd)) )
+#else
                ( DBLE(CONJG(evc_d(   i  ,ibnd))*evc_d(   i  ,ibnd)) + &
                  DBLE(CONJG(evc_d(i+npwx,ibnd))*evc_d(i+npwx,ibnd)) )
+#endif
            ELSE
               tmpf = wg_nk * kfac_d(i) * &
+#if defined(__OPENMP_GPU)
+                    DBLE( CONJG(evc(i, ibnd) ) * evc(i, ibnd) )
+#else
                     DBLE( CONJG(evc_d(i, ibnd) ) * evc_d(i, ibnd) )
+#endif
            ENDIF
            s11 = s11 + tmpf * gk_d(i,1)*gk_d(i,1)
            s21 = s21 + tmpf * gk_d(i,2)*gk_d(i,1)
@@ -160,9 +193,9 @@ SUBROUTINE stres_knl_gpu( sigmanlc, sigmakin )
   !
   CALL symmatrix( sigmakin )
   CALL symmatrix( sigmanlc )
-#endif   
+#endif
   !
   RETURN
   !
-END SUBROUTINE stres_knl_gpu 
+END SUBROUTINE stres_knl_gpu
 

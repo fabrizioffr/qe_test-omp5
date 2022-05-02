@@ -154,7 +154,10 @@ SUBROUTINE v_xc_meta( rho, rho_core, rhog_core, etxc, vtxc, v, kedtaur )
   USE constants,        ONLY : e2, eps8
   USE io_global,        ONLY : stdout
   USE fft_base,         ONLY : dfftp
-  USE gvect,            ONLY : g, g_d, ngm
+  USE gvect,            ONLY : g, ngm
+#if !defined(__OPENMP_GPU)
+  USE gvect,            ONLY : g_d
+#endif
   USE lsda_mod,         ONLY : nspin
   USE cell_base,        ONLY : omega
   USE funct,            ONLY : dft_is_nonlocc, nlc
@@ -211,11 +214,13 @@ SUBROUTINE v_xc_meta( rho, rho_core, rhog_core, etxc, vtxc, v, kedtaur )
   IF (nspin==2) np=3
   !
   !$acc data copyin( rho ) copyout( kedtaur, v )
+  !$omp target data map(to:rho) map(from:kedtaur, v)
   !
   ALLOCATE( grho(3,dfftp%nnr,nspin) )
   ALLOCATE( h(3,dfftp%nnr,nspin) )
   ALLOCATE( rhogsum(ngm), tau(dfftp%nnr,nspin) )
   !$acc data create( tau, grho, h )
+  !$omp target data map(alloc:tau, grho, h)
   !
   ALLOCATE( ex(dfftp%nnr), ec(dfftp%nnr) )
   ALLOCATE( v1x(dfftp%nnr,nspin), v2x(dfftp%nnr,nspin)   , v3x(dfftp%nnr,nspin) )
@@ -225,28 +230,37 @@ SUBROUTINE v_xc_meta( rho, rho_core, rhog_core, etxc, vtxc, v, kedtaur )
   ! ... in LSDA case rhogsum is in (up,down) format
   !
   !$acc data create( rhogsum ) copyin( rhog_core, rho%of_g, rho%kin_r )
+  !$omp target data map(alloc: rhogsum) map(to:rhog_core, rho%of_g, rho%kin_r)
   DO is = 1, nspin
      !
      sgn_is = (-1.d0)**(is+1)
      !
      !$acc parallel loop present(rho)
+     !$omp target teams loop
      DO k = 1, ngm
        rhogsum(k) = fac*rhog_core(k) + ( rho%of_g(k,1) + sgn_is*rho%of_g(k,nspin) )*0.5D0
      ENDDO
      !
      IF ( use_gpu ) THEN
        !$acc host_data use_device( rhogsum, grho )
+#if defined(__OPENMP_GPU)
+       CALL fft_gradient_g2r_gpu( dfftp, rhogsum, g, grho(:,:,is) )
+#else
        CALL fft_gradient_g2r_gpu( dfftp, rhogsum, g_d, grho(:,:,is) )
+#endif
        !$acc end host_data
      ELSE
        !$acc update host( rhogsum )
+       !$omp target update from(rhogsum)
        CALL fft_gradient_g2r( dfftp, rhogsum, g, grho(:,:,is) )
        !$acc update device( grho )
+       !$omp target update to(grho)
      ENDIF
      !
   ENDDO
   !
   !$acc parallel loop collapse(2) present(rho)
+  !$omp target teams loop collapse(2)
   DO is = 1, nspin
     DO k = 1, dfftp%nnr
       tau(k,is) = rho%kin_r(k,is)/e2
@@ -254,10 +268,12 @@ SUBROUTINE v_xc_meta( rho, rho_core, rhog_core, etxc, vtxc, v, kedtaur )
   ENDDO
   !
   !$acc end data
+  !$omp end target data
   DEALLOCATE( rhogsum )
   !
   !$acc data copyin( rho%of_r )
   !$acc data create( ex, ec, v1x, v2x, v3x, v1c, v2c, v3c )
+  !$omp target data map(to:rho%of_r) map(alloc:ex, ec, v1x, v2x, v3x, v1c, v2c, v3c)
   IF (nspin == 1) THEN
     !
     CALL xc_metagcx( dfftp%nnr, 1, np, rho%of_r, grho, tau, ex, ec, &
@@ -265,6 +281,8 @@ SUBROUTINE v_xc_meta( rho, rho_core, rhog_core, etxc, vtxc, v, kedtaur )
     !
     !$acc parallel loop reduction(+:etxc) reduction(+:vtxc) reduction(-:rhoneg1) &
     !$acc&              reduction(-:rhoneg2) present(rho)
+    !$omp target teams loop reduction(+:etxc) reduction(+:vtxc) reduction(-:rhoneg1) &
+    !$omp&              reduction(-:rhoneg2)
     DO k = 1, dfftp%nnr
        !
        v(k,1) = (v1x(k,1)+v1c(k,1)) * e2
@@ -287,8 +305,10 @@ SUBROUTINE v_xc_meta( rho, rho_core, rhog_core, etxc, vtxc, v, kedtaur )
     !
     ALLOCATE( rho_updw(dfftp%nnr,2) )
     !$acc data create( rho_updw )
+    !$omp target data map(alloc:rho_updw)
     !
     !$acc parallel loop present(rho)
+    !$omp target teams loop
     DO k = 1, dfftp%nnr
         rho_updw(k,1) = ( rho%of_r(k,1) + rho%of_r(k,2) ) * 0.5d0
         rho_updw(k,2) = ( rho%of_r(k,1) - rho%of_r(k,2) ) * 0.5d0
@@ -301,6 +321,8 @@ SUBROUTINE v_xc_meta( rho, rho_core, rhog_core, etxc, vtxc, v, kedtaur )
     !
     !$acc parallel loop reduction(+:etxc) reduction(+:vtxc) reduction(-:rhoneg1) &
     !$acc&              reduction(-:rhoneg2)
+    !$omp target teams loop reduction(+:etxc) reduction(+:vtxc) reduction(-:rhoneg1) &
+    !$omp&              reduction(-:rhoneg2)
     DO k = 1, dfftp%nnr
        !
        v(k,1) = (v1x(k,1) + v1c(k,1)) * e2
@@ -326,35 +348,45 @@ SUBROUTINE v_xc_meta( rho, rho_core, rhog_core, etxc, vtxc, v, kedtaur )
     ENDDO
     !
     !$acc end data
+    !$omp end target data
     DEALLOCATE( rho_updw )
     !
   ENDIF
   !
   !$acc end data
+  !$omp end target data
   DEALLOCATE( ex, ec )
   DEALLOCATE( v1x, v2x, v3x )
   DEALLOCATE( v1c, v2c, v3c )
   !
   ALLOCATE( dh( dfftp%nnr ) )
   !$acc data create( dh )
+  !$omp target data map(alloc:dh)
   !
   ! ... second term of the gradient correction :
   ! ... \sum_alpha (D / D r_alpha) ( D(rho*Exc)/D(grad_alpha rho) )
   !
   DO is = 1, nspin
      IF ( use_gpu ) THEN
+#if defined(__OPENMP_GPU)
+       CALL fft_graddot_gpu( dfftp, h(1,1,is), g, dh )
+#else
        !$acc host_data use_device( h, dh )
        CALL fft_graddot_gpu( dfftp, h(1,1,is), g_d, dh )
        !$acc end host_data
+#endif
      ELSE
        !$acc update host( h )
+       !$omp target update from(h)
        CALL fft_graddot( dfftp, h(1,1,is), g, dh )
        !$acc update device( dh )
+       !$omp target update to(h)
      ENDIF
      !
      sgn_is = (-1.d0)**(is+1)
      !
      !$acc parallel loop reduction(-:vtxc) present(rho)
+     !$omp target teams loop reduction(-:vtxc)
      DO k = 1, dfftp%nnr
        v(k,is) = v(k,is) - dh(k)
        vtxc = vtxc - dh(k) * ( rho%of_r(k,1) + sgn_is*rho%of_r(k,nspin) )*0.5D0
@@ -362,11 +394,14 @@ SUBROUTINE v_xc_meta( rho, rho_core, rhog_core, etxc, vtxc, v, kedtaur )
   ENDDO
   !
   !$acc end data
+  !$omp end target data
   DEALLOCATE( dh )
   !
   !$acc end data
   !$acc end data
   !$acc end data
+  !$omp end target data
+  !$omp end target data
   !
   CALL mp_sum( rhoneg1, intra_bgrp_comm )
   CALL mp_sum( rhoneg2, intra_bgrp_comm )
@@ -477,12 +512,15 @@ SUBROUTINE v_xc( rho, rho_core, rhog_core, etxc, vtxc, v )
   !
   !$acc data copyin( rho_core, rhog_core, rho ) copyout( v )
   !$acc data copyin( rho%of_r, rho%of_g )
+  !$omp target data map(to:rho_core, rhog_core, rho, rho%of_r, rho%of_g) map(from:v)
   !
   ALLOCATE( ex(dfftp%nnr), vx(dfftp%nnr,nspin) )
   ALLOCATE( ec(dfftp%nnr), vc(dfftp%nnr,nspin) )
   !$acc data create( ex, ec, vx, vc )
+  !$omp target data map(alloc:ex, ec, vx, vc)
   !
   !$acc parallel loop
+  !$omp target teams loop
   DO ir = 1, dfftp%nnr
     rho%of_r(ir,1) = rho%of_r(ir,1) + rho_core(ir)
   ENDDO
@@ -494,6 +532,7 @@ SUBROUTINE v_xc( rho, rho_core, rhog_core, etxc, vtxc, v )
      !
      !$acc parallel loop reduction(+:etxc) reduction(+:vtxc) reduction(-:rhoneg1) &
      !$acc&              present(rho)
+     !$omp target teams loop reduction(+:etxc) reduction(+:vtxc) reduction(-:rhoneg1)
      DO ir = 1, dfftp%nnr
         v(ir,1) = e2*( vx(ir,1) + vc(ir,1) )
         etxc = etxc + e2*( ex(ir) + ec(ir) )*rho%of_r(ir,1)
@@ -510,6 +549,8 @@ SUBROUTINE v_xc( rho, rho_core, rhog_core, etxc, vtxc, v )
      !
      !$acc parallel loop reduction(+:etxc) reduction(+:vtxc) reduction(-:rhoneg1) &
      !$acc&              reduction(-:rhoneg2) present(rho)
+     !$omp target teams loop reduction(+:etxc) reduction(+:vtxc) reduction(-:rhoneg1) &
+     !$omp&                  reduction(-:rhoneg2)
      DO ir = 1, dfftp%nnr
         v(ir,1) = e2*( vx(ir,1) + vc(ir,1) )
         v(ir,2) = e2*( vx(ir,2) + vc(ir,2) )
@@ -531,6 +572,8 @@ SUBROUTINE v_xc( rho, rho_core, rhog_core, etxc, vtxc, v )
       !
       !$acc parallel loop reduction(+:etxc) reduction(+:vtxc) reduction(-:rhoneg1) &
       !$acc&              reduction(+:rhoneg2) present(rho)
+      !$omp target teams loop reduction(+:etxc) reduction(+:vtxc) reduction(-:rhoneg1) &
+      !$omp&                  reduction(+:rhoneg2)
       DO ir = 1, dfftp%nnr
          arho = ABS( rho%of_r(ir,1) )
          IF ( arho < vanishing_charge ) THEN
@@ -563,6 +606,7 @@ SUBROUTINE v_xc( rho, rho_core, rhog_core, etxc, vtxc, v )
   ENDIF
   !
   !$acc end data
+  !$omp end target data
   DEALLOCATE( ex, vx )
   DEALLOCATE( ec, vc )
   !
@@ -586,6 +630,7 @@ SUBROUTINE v_xc( rho, rho_core, rhog_core, etxc, vtxc, v )
   !
   !$acc end data
   !$acc end data
+  !$omp end target data
   !
   ! ... add non local corrections (if any)
   !

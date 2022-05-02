@@ -13,7 +13,10 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
   !
   USE constants,            ONLY : e2
   USE kinds,                ONLY : DP
-  USE gvect,                ONLY : ngm, g, g_d
+  USE gvect,                ONLY : ngm, g
+#if !defined(__OPENMP_GPU)
+  USE gvect,                ONLY : g_d
+#endif
   USE lsda_mod,             ONLY : nspin
   USE cell_base,            ONLY : omega
   USE xc_lib,               ONLY : igcc_is_lyp, xclib_dft_is, xc_gcx
@@ -62,9 +65,11 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
   ALLOCATE( v1x(dfftp%nnr,nspin0), v2x(dfftp%nnr,nspin0) )
   ALLOCATE( v1c(dfftp%nnr,nspin0), v2c(dfftp%nnr,nspin0) )
   !$acc data create( rhoaux, grho, sx, sc, v1x, v2x, v1c, v2c, h )
+  !$omp target enter data map(alloc:rhoaux, grho, sx, sc, v1x, v2x, v1c, v2c, h)
   !
   ALLOCATE( rhogaux(ngm,nspin0) )
   !$acc data create( rhogaux )
+  !$omp target data map(alloc:rhogaux)
   !
   ! ... calculate the gradient of rho + rho_core in real space
   !
@@ -74,6 +79,8 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
     !
     !$acc data copyout( vsave )
     !$acc parallel loop collapse(2)
+    !$omp target data map(from:vsave)
+    !$omp target teams loop collapse(2)
     DO is = 1, nspin
       DO ir = 1, dfftp%nnr
         vsave(ir,is) = v(ir,is)
@@ -81,25 +88,30 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
       ENDDO
     ENDDO
     !$acc end data
+    !$omp end target data
     !
     ! ... bring starting rhoaux to G-space
     IF ( use_gpu ) THEN
       !$acc data copyout( segni )
+      !$omp target data map(from:segni)
       !$acc host_data use_device( rho, rhoaux, rhogaux, segni )
       CALL compute_rho_gpu( rho, rhoaux, segni, dfftp%nnr )
       CALL rho_r2g_gpu( dfftp, rhoaux(:,1:nspin0), rhogaux(:,1:nspin0) )
       !$acc end host_data
       !$acc end data
+      !$omp end target data
     ELSE
       CALL compute_rho( rho, rhoaux, segni, dfftp%nnr )
       CALL rho_r2g( dfftp, rhoaux(:,1:nspin0), rhogaux(:,1:nspin0) )
       !$acc update device( rhoaux, rhogaux )
+      !$omp target update to(rhoaux, rhogaux)
     ENDIF
     !
   ELSE
     ! ... for convenience rhoaux and rhogaux are in (up,down) format, when LSDA
     !
     !$acc parallel loop collapse(2)
+    !$omp target teams loop collapse(2)
     DO is = 1, nspin0
       DO ir = 1, dfftp%nnr
         sgn_is = DBLE(3-2*is)
@@ -107,6 +119,7 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
       ENDDO
     ENDDO
     !$acc parallel loop collapse(2)
+    !$omp target teams loop collapse(2)
     DO is = 1, nspin0
       DO ir = 1, ngm
         sgn_is = DBLE(3-2*is)
@@ -118,12 +131,14 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
   ENDIF
   !
   !$acc parallel loop collapse(2)
+  !$omp target teams loop collapse(2)
   DO is = 1, nspin0
     DO ir = 1, dfftp%nnr
       rhoaux(ir,is) = fac * rho_core(ir) + rhoaux(ir,is)
     ENDDO
   ENDDO
   !$acc parallel loop collapse(2)
+  !$omp target teams loop collapse(2)
   DO is = 1, nspin0
     DO ir = 1, ngm
       rhogaux(ir,is) = CMPLX(fac,kind=DP) * rhog_core(ir) + rhogaux(ir,is)
@@ -132,17 +147,24 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
   !
   DO is = 1, nspin0
     IF ( use_gpu ) THEN
+#if !defined(__OPENMP_GPU)
       !$acc host_data use_device( rhogaux, grho )
       CALL fft_gradient_g2r_gpu( dfftp, rhogaux(:,is), g_d, grho(:,:,is) )
       !$acc end host_data
+#else
+      CALL fft_gradient_g2r_gpu( dfftp, rhogaux(:,is), g, grho(:,:,is) )
+#endif
     ELSE
       !$acc update host( rhogaux )
+      !$omp target update from(rhogaux)
       CALL fft_gradient_g2r( dfftp, rhogaux(:,is), g, grho(:,:,is) )
       !$acc update device( grho )
+      !$omp target update to(rhogaux)
     ENDIF
   ENDDO
   !
   !$acc end data
+  !$omp end target data
   DEALLOCATE( rhogaux )
   !
   IF ( nspin0 == 1 ) THEN
@@ -153,6 +175,7 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
                   gpu_args_=.TRUE. )
      !
      !$acc parallel loop reduction(+:etxcgc) reduction(+:vtxcgc)
+     !$omp target teams loop reduction(+:etxcgc) reduction(+:vtxcgc)
      DO k = 1, dfftp%nnr
         ! ... first term of the gradient correction : D(rho*Exc)/D(rho)
         v(k,1) = v(k,1) + e2 * ( v1x(k,1) + v1c(k,1) )
@@ -172,6 +195,7 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
      !
      ALLOCATE( v2c_ud(dfftp%nnr) )
      !$acc data create( v2c_ud )
+     !$omp target data map(alloc:v2c_ud)
      !
      CALL xc_gcx( dfftp%nnr, nspin0, rhoaux, grho, sx, sc, v1x, v2x, v1c, v2c, &
                   v2c_ud, gpu_args_=.TRUE. )
@@ -179,6 +203,7 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
      ! ... h contains D(rho*Exc)/D(|grad rho|) * (grad rho) / |grad rho|
      !
      !$acc parallel loop reduction(+:etxcgc) reduction(+:vtxcgc)
+     !$omp target teams loop reduction(+:etxcgc) reduction(+:vtxcgc)
      DO k = 1, dfftp%nnr
         !
         DO is = 1, nspin0
@@ -200,11 +225,13 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
      ENDDO
      !
      !$acc end data
+     !$omp end target data
      DEALLOCATE( v2c_ud )
      !
   ENDIF
   !
   !$acc parallel loop collapse(2)
+  !$omp target teams loop collapse(2)
   DO is = 1, nspin0
     DO k = 1, dfftp%nnr
       rhoaux(k,is) = rhoaux(k,is) - fac * rho_core(k)
@@ -213,21 +240,29 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
   !
   ALLOCATE( dh(dfftp%nnr) )
   !$acc data create( dh )
+  !$omp target data map(alloc:dh)
   !
   ! ... second term of the gradient correction :
   ! ... \sum_alpha (D / D r_alpha) ( D(rho*Exc)/D(grad_alpha rho) )
   !
   DO is = 1, nspin0
      IF ( use_gpu ) THEN
+#if !defined(__OPENMP_GPU)
        !$acc host_data use_device( h, dh )
        CALL fft_graddot_gpu( dfftp, h(1,1,is), g_d, dh )
        !$acc end host_data
+#else
+       CALL fft_graddot_gpu( dfftp, h(1,1,is), g, dh )
+#endif
      ELSE
        !$acc update host( h )
+       !$omp target update from(h)
        CALL fft_graddot( dfftp, h(1,1,is), g, dh )
        !$acc update device( dh )
+       !$omp target update to(dh)
      ENDIF
      !$acc parallel loop reduction(-:vtxcgc)
+     !$omp target teams loop reduction(-:vtxcgc)
      DO k = 1, dfftp%nnr
        v(k,is) = v(k,is) - dh(k)
        vtxcgc = vtxcgc - dh(k) * rhoaux(k,is)
@@ -235,6 +270,7 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
   ENDDO
   !
   !$acc end data
+  !$omp end target data
   !
   vtxc = vtxc + omega * vtxcgc / ( dfftp%nr1 * dfftp%nr2 * dfftp%nr3 )
   etxc = etxc + omega * etxcgc / ( dfftp%nr1 * dfftp%nr2 * dfftp%nr3 )
@@ -242,8 +278,10 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
   IF (nspin==4 .AND. domag) THEN
      ALLOCATE( vgg(dfftp%nnr,nspin0)  )
      !$acc data copyin( segni, vsave ) create( vgg )
+     !$omp target data map(to: segni, vsave) map(alloc:vgg)
      !
      !$acc parallel loop collapse(2)
+     !$omp target teams loop collapse(2)
      DO is = 1, nspin
        DO ir = 1, dfftp%nnr
          IF (is<=nspin0) vgg(ir,is) = v(ir,is)
@@ -252,6 +290,7 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
      ENDDO
      !
      !$acc parallel loop
+     !$omp target teams loop
      DO k = 1, dfftp%nnr
         v(k,1) = v(k,1) + 0.5d0*(vgg(k,1)+vgg(k,2))
         amag = SQRT(rho(k,2)**2+rho(k,3)**2+rho(k,4)**2)
@@ -263,6 +302,7 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
      ENDDO
      !
      !$acc end data
+     !$omp end target data
      DEALLOCATE( segni )
      DEALLOCATE( vgg, vsave )
   ENDIF
@@ -275,6 +315,7 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
   DEALLOCATE( dh, h )
   !
   !$acc end data
+  !$omp target exit data map(delete:rhoaux, grho, sx, sc, v1x, v2x, v1c, v2c, h)
   !
   RETURN
   !

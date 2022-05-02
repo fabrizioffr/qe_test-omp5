@@ -100,8 +100,8 @@ SUBROUTINE h_psi__gpu( lda, n, m, psi_d, hpsi_d )
 #endif
   USE lsda_mod,                ONLY : current_spin
 #if defined(__OPENMP_GPU)
-  USE scf_gpum,                ONLY: using_vrs_d
-  USE scf,                     ONLY: vrs
+  USE scf_gpum,                ONLY : using_vrs_d
+  USE scf,                     ONLY : vrs
 #else
   USE scf_gpum,                ONLY : vrs_d, using_vrs_d
 #endif

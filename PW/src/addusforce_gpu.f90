@@ -44,22 +44,36 @@ SUBROUTINE addusforce_g_gpu( forcenl )
   USE ions_base,          ONLY : nat, ntyp => nsp, ityp
   USE cell_base,          ONLY : omega, tpiba
   USE fft_base,           ONLY : dfftp
+#if defined(__OPENMP_GPU)
+  USE gvect,              ONLY : ngm, gg, g, eigts1, eigts2, eigts3, mill
+#else
   USE gvect,              ONLY : ngm, gg_d, g_d, eigts1_d, eigts2_d, eigts3_d,&
                                  mill_d
+#endif
   USE noncollin_module,   ONLY : nspin_mag
   USE scf,                ONLY : v, vltot
-  USE uspp,               ONLY : becsum, becsum_d, okvan
+  USE uspp,               ONLY : becsum, okvan
+#if !defined(__OPENMP_GPU)
+  USE uspp,               ONLY : becsum_d
+#endif
   USE uspp_param,         ONLY : upf, lmaxq, nh, nhm
   USE mp_bands,           ONLY : intra_bgrp_comm
   USE mp_pools,           ONLY : inter_pool_comm
   USE mp,                 ONLY : mp_sum
   USE control_flags,      ONLY : gamma_only
   USE fft_interfaces,     ONLY : fwfft
+#if defined(__CUDA) || defined(__OPENMP_GPU)
+  USE devxlib_buffers,    ONLY : dev_buf => gpu_buffer
 #if defined(__CUDA)
-  USE device_fbuff_m,     ONLY : dev_buf
   USE cudafor
   USE cublas
-#else
+#endif
+#if defined(__OPENMP_GPU)
+  USE omp_lib
+  USE onemkl_blas_omp_offload_no_array_check
+#endif
+#endif
+#if !defined(__CUDA)
 #define cublasDGEMM Dgemm
 #endif
 
@@ -86,7 +100,8 @@ SUBROUTINE addusforce_g_gpu( forcenl )
   REAL(DP)                 :: forceqx, forceqy, forceqz
 #if defined(__CUDA)
 ATTRIBUTES (DEVICE) aux_d, aux1_d, vg_d, qgm_d, ddeeq_d, qmod_d, ylmk0_d,nl_d
-
+#endif
+#if defined(__CUDA) || defined(__OPENMP_GPU)
   nl_d => dfftp%nl_d
   IF (.NOT.okvan) RETURN
   !
@@ -135,14 +150,23 @@ ATTRIBUTES (DEVICE) aux_d, aux1_d, vg_d, qgm_d, ddeeq_d, qmod_d, ylmk0_d,nl_d
   CALL dev_buf%lock_buffer( ylmk0_d, [ngm_l,lmaxq*lmaxq], ierr )
   IF (ierr /= 0) CALL errore( 'addusforce_gpu', 'cannot allocate buffers', ABS(ierr) )
   !
+#if defined(__OPENMP_GPU)
+  CALL ylmr2_gpu( lmaxq * lmaxq, ngm_l, g(1,ngm_s), gg(ngm_s), ylmk0_d )
+#else
   CALL ylmr2_gpu( lmaxq * lmaxq, ngm_l, g_d(1,ngm_s), gg_d(ngm_s), ylmk0_d )
+#endif
   !
   CALL dev_buf%lock_buffer( qmod_d, ngm_l, ierr  )
   IF (ierr /= 0) CALL errore( 'addusforce_gpu', 'cannot allocate buffers', ABS(ierr) )
   !
   !$cuf kernel do
+  !$omp target teams distribute parallel do
   DO ig = 1, ngm_l
-     qmod_d(ig) = SQRT( gg_d(ngm_s+ig-1) )*tpiba
+#if defined(__OPENMP_GPU)
+     qmod_d (ig) = SQRT(gg(ngm_s+ig-1))*tpiba
+#else
+     qmod_d (ig) = SQRT(gg_d(ngm_s+ig-1))*tpiba
+#endif
   ENDDO
   !
   DO nt = 1, ntyp
@@ -185,14 +209,24 @@ ATTRIBUTES (DEVICE) aux_d, aux1_d, vg_d, qgm_d, ddeeq_d, qmod_d, ylmk0_d,nl_d
                  ! aux1 = product of potential, structure factor and iG
                  !
                  !$cuf kernel do
+                 !$omp target teams distribute parallel do
                  do ig = 1, ngm_l
                     cfac = vg_d(ngm_s+ig-1, is) * &
+#if defined(__OPENMP_GPU)
+                         CONJG(eigts1(mill(1,ngm_s+ig-1),na) * &
+                               eigts2(mill(2,ngm_s+ig-1),na) * &
+                               eigts3(mill(3,ngm_s+ig-1),na) )
+                    aux1_d(ig, nb, 1) = g(1,ngm_s+ig-1) * cfac
+                    aux1_d(ig, nb, 2) = g(2,ngm_s+ig-1) * cfac
+                    aux1_d(ig, nb, 3) = g(3,ngm_s+ig-1) * cfac
+#else
                          CONJG(eigts1_d(mill_d(1,ngm_s+ig-1),na) * &
                                eigts2_d(mill_d(2,ngm_s+ig-1),na) * &
                                eigts3_d(mill_d(3,ngm_s+ig-1),na) )
                     aux1_d(ig, nb, 1) = g_d(1,ngm_s+ig-1) * cfac
                     aux1_d(ig, nb, 2) = g_d(2,ngm_s+ig-1) * cfac
                     aux1_d(ig, nb, 3) = g_d(3,ngm_s+ig-1) * cfac
+#endif
                  enddo
                  !
               ENDIF
@@ -202,8 +236,10 @@ ATTRIBUTES (DEVICE) aux_d, aux1_d, vg_d, qgm_d, ddeeq_d, qmod_d, ylmk0_d,nl_d
            !    No need for special treatment of the G=0 term (is zero)
            !
            DO ipol = 1, 3
+              !$omp target variant dispatch use_device_ptr(qgm_d,aux1_d,ddeeq_d)
               CALL cublasDGEMM( 'C', 'N', nij, nab, 2*ngm_l, fact, qgm_d, 2*ngm_l, &
                    aux1_d(1,1,ipol), 2*ngm_l, 0.0_dp, ddeeq_d(1,1,ipol,is), nij )
+              !$omp end target variant dispatch
            ENDDO
            !
         ENDDO
@@ -221,10 +257,17 @@ ATTRIBUTES (DEVICE) aux_d, aux1_d, vg_d, qgm_d, ddeeq_d, qmod_d, ylmk0_d,nl_d
                  forceqy = 0
                  forceqz = 0
                  !$cuf kernel do
+                 !$omp target teams distribute parallel do
                     DO ijh = 1, nij
+#if defined(__OPENMP_GPU)
+                       forceqx = forceqx + ddeeq_d(ijh, nb, 1, is) * becsum(ijh, na, is)
+                       forceqy = forceqy + ddeeq_d(ijh, nb, 2, is) * becsum(ijh, na, is)
+                       forceqz = forceqz + ddeeq_d(ijh, nb, 3, is) * becsum(ijh, na, is)
+#else
                        forceqx = forceqx + ddeeq_d(ijh, nb, 1, is) * becsum_d(ijh, na, is)
                        forceqy = forceqy + ddeeq_d(ijh, nb, 2, is) * becsum_d(ijh, na, is)
                        forceqz = forceqz + ddeeq_d(ijh, nb, 3, is) * becsum_d(ijh, na, is)
+#endif
                     ENDDO
                 forceq(1,na) = forceq(1,na)+forceqx
                 forceq(2,na) = forceq(2,na)+forceqy

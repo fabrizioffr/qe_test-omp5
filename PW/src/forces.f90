@@ -12,7 +12,7 @@ SUBROUTINE forces()
   !! acting on the atoms. The complete expression of the forces
   !! contains many parts which are computed by different routines:
   !
-  !! - force_lc: local potential contribution 
+  !! - force_lc: local potential contribution
   !! - force_us: non-local potential contribution
   !! - (esm_)force_ew: (ESM) electrostatic ewald term
   !! - force_cc: nonlinear core correction contribution
@@ -25,11 +25,18 @@ SUBROUTINE forces()
   !
   USE kinds,             ONLY : DP
   USE io_global,         ONLY : stdout
-  USE cell_base,         ONLY : at, bg, alat, omega  
+  USE cell_base,         ONLY : at, bg, alat, omega
   USE ions_base,         ONLY : nat, ntyp => nsp, ityp, tau, zv, amass, extfor, atm
   USE fft_base,          ONLY : dfftp
-  USE gvect,             ONLY : ngm, gstart, ngl, igtongl, igtongl_d, g, gg, &
-                                g_d, gcutm
+  USE gvect,             ONLY : ngm, gstart, ngl, igtongl, g, gg, gcutm
+#if defined(__CUDA) || defined(__OPENMP_GPU)
+  USE devxlib_buffers,   ONLY : dev_buf => gpu_buffer
+#endif
+#if !defined(__OPENMP_GPU)
+  USE gvect,             ONLY : igtongl_d
+  USE gvect_gpum,        ONLY : g_d
+  USE device_memcpy_m,   ONLY : dev_memcpy
+#endif
   USE lsda_mod,          ONLY : nspin
   USE symme,             ONLY : symvector
   USE vlocal,            ONLY : strf, vloc
@@ -57,10 +64,6 @@ SUBROUTINE forces()
   USE qmmm,              ONLY : qmmm_mode
   !
   USE control_flags,     ONLY : use_gpu
-#if defined(__CUDA)
-  USE device_fbuff_m,          ONLY : dev_buf
-  USE device_memcpy_m,     ONLY : dev_memcpy
-#endif
   !
   IMPLICIT NONE
   !
@@ -116,27 +119,33 @@ SUBROUTINE forces()
   !
   ALLOCATE( forcenl(3,nat), forcelc(3,nat), forcecc(3,nat), &
             forceh(3,nat), forceion(3,nat), forcescc(3,nat) )
-  !    
+  !
   forcescc(:,:) = 0.D0
   forceh(:,:)   = 0.D0
   !
   ! ... The nonlocal contribution is computed here
   !
-  call start_clock('frc_us') 
+  call start_clock('frc_us')
   IF (.not. use_gpu) CALL force_us( forcenl )
   IF (      use_gpu) CALL force_us_gpu( forcenl )
-  call stop_clock('frc_us') 
+  call stop_clock('frc_us')
   !
   ! ... The local contribution
   !
-  CALL start_clock('frc_lc') 
+  CALL start_clock('frc_lc')
   IF (.not. use_gpu) & ! On the CPU
      CALL force_lc( nat, tau, ityp, alat, omega, ngm, ngl, igtongl, &
                  g, rho%of_r(:,1), dfftp%nl, gstart, gamma_only, vloc, &
                  forcelc )
-#if defined(__CUDA)
   IF (      use_gpu) THEN ! On the GPU
      ! move these data to the GPU
+#if defined(__OPENMP_GPU)
+     !$omp target enter data map(to:vloc)
+     CALL force_lc_gpu( nat, tau, ityp, alat, omega, ngm, ngl, igtongl, &
+                   g, rho%of_r(:,1), dfftp%nl_d, gstart, gamma_only, vloc, &
+                   forcelc )
+     !$omp target exit data map(delete:vloc)
+#elif defined(__CUDA)
      CALL dev_buf%lock_buffer(vloc_d, (/ ngl, ntyp /) , ierr)
      IF (ierr /= 0) CALL errore( 'forces', 'cannot allocate buffers', -1 )
      CALL dev_memcpy(vloc_d, vloc)
@@ -144,17 +153,17 @@ SUBROUTINE forces()
                    g_d, rho%of_r(:,1), dfftp%nl_d, gstart, gamma_only, vloc_d, &
                    forcelc )
      CALL dev_buf%release_buffer(vloc_d, ierr)
-  END IF
 #endif
-  call stop_clock('frc_lc') 
+  END IF
+  call stop_clock('frc_lc')
   !
   ! ... The NLCC contribution
   !
-  call start_clock('frc_cc') 
+  call start_clock('frc_cc')
   IF (.not. use_gpu) CALL force_cc( forcecc )
   IF (      use_gpu) CALL force_cc_gpu( forcecc )
   !
-  call stop_clock('frc_cc') 
+  call stop_clock('frc_cc')
 
   ! ... The Hubbard contribution
   !     (included by force_us if using beta as local projectors)
@@ -211,7 +220,7 @@ SUBROUTINE forces()
   ! ... The SCF contribution
   !
   call start_clock('frc_scc')
-#if defined(__CUDA)
+#if defined(__CUDA) || defined(__OPENMP_GPU)
   ! Cleanup scratch space again, next subroutines uses a lot of memory.
   ! In an ideal world this should be done only if really needed (TODO).
   CALL dev_buf%reinit(ierr)
@@ -220,7 +229,7 @@ SUBROUTINE forces()
   !
   IF ( .not. use_gpu ) CALL force_corr( forcescc )
   IF (       use_gpu ) CALL force_corr_gpu( forcescc )
-  call stop_clock('frc_scc') 
+  call stop_clock('frc_scc')
   !
   IF (do_comp_mt) THEN
     !
@@ -283,7 +292,7 @@ SUBROUTINE forces()
         IF ( tefield )  force(ipol,na) = force(ipol,na) + forcefield(ipol,na)
         IF ( gate )     force(ipol,na) = force(ipol,na) + forcegate(ipol,na) ! TB
         IF (lelfield)   force(ipol,na) = force(ipol,na) + forces_bp_efield(ipol,na)
-        IF (do_comp_mt) force(ipol,na) = force(ipol,na) + force_mt(ipol,na) 
+        IF (do_comp_mt) force(ipol,na) = force(ipol,na) + force_mt(ipol,na)
         !
         sumfor = sumfor + force(ipol,na)
         !
@@ -306,7 +315,7 @@ SUBROUTINE forces()
         ! ... impose total force = 0 except in a QM-MM calculation
         !
         DO na = 1, nat
-           force(ipol,na) = force(ipol,na) - sumfor / DBLE( nat ) 
+           force(ipol,na) = force(ipol,na) - sumfor / DBLE( nat )
         ENDDO
         !
      ENDIF
@@ -471,7 +480,7 @@ SUBROUTINE forces()
   DEALLOCATE( forcenl, forcelc, forcecc, forceh, forceion, forcescc )
   IF ( llondon  ) DEALLOCATE( force_disp       )
   IF ( ldftd3   ) DEALLOCATE( force_d3         )
-  IF ( lxdm     ) DEALLOCATE( force_disp_xdm   ) 
+  IF ( lxdm     ) DEALLOCATE( force_disp_xdm   )
   IF ( lelfield ) DEALLOCATE( forces_bp_efield )
   IF(ALLOCATED(force_mt))   DEALLOCATE( force_mt )
   !

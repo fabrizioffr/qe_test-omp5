@@ -16,7 +16,15 @@ SUBROUTINE init_us_2_base_gpu( npw_, npwx, igk__d, q_, nat, tau, ityp, &
   !
   USE upf_kinds,       ONLY : DP
   USE upf_const,       ONLY : tpi
-  USE uspp_data,       ONLY : nqx, dq, tab_d
+  USE uspp_data,       ONLY : nqx, dq
+#if defined(__OPENMP_GPU)
+  USE uspp_data,      ONLY : tab
+  USE omp_lib
+  USE dmr,             ONLY : omp_target_memcpy_f
+  USE dmr_environment, ONLY : I4P
+#else
+  USE uspp_data,      ONLY : tab_d
+#endif
   USE uspp,            ONLY : nkb, nhtol, nhtolm, indv
   USE uspp_param,      ONLY : upf, lmaxkb, nhm, nh, nsp
   USE devxlib_buffers, ONLY : gpu_buffer
@@ -74,6 +82,9 @@ SUBROUTINE init_us_2_base_gpu( npw_, npwx, igk__d, q_, nat, tau, ityp, &
   integer :: iq
 #if defined(__CUDA)
   attributes(DEVICE) :: gk_d, qg_d, vq_d, ylm_d, vkb1_d, sk_d
+#endif
+  !
+#if defined(__CUDA) || defined(__OPENMP_GPU)
   !
   CALL start_clock( 'init_us_2:gpu' )
   !
@@ -100,6 +111,7 @@ SUBROUTINE init_us_2_base_gpu( npw_, npwx, igk__d, q_, nat, tau, ityp, &
   q3 = q_(3)
 
   !$cuf kernel do(1) <<<*,*>>>
+  !$omp target teams distribute parallel do
   do ig = 1, npw_
      iv_d = igk__d(ig)
      gk_d (1,ig) = q1 + g_d(1, iv_d )
@@ -115,6 +127,7 @@ SUBROUTINE init_us_2_base_gpu( npw_, npwx, igk__d, q_, nat, tau, ityp, &
   ! set now qg=|q+G| in atomic units
   !
   !$cuf kernel do(1) <<<*,*>>>
+  !$omp target teams distribute parallel do
   do ig = 1, npw_
      qg_d(ig) = sqrt(qg_d(ig))*tpiba
   enddo
@@ -134,8 +147,13 @@ SUBROUTINE init_us_2_base_gpu( npw_, npwx, igk__d, q_, nat, tau, ityp, &
            i1 = i0 + 1
            i2 = i0 + 2
            i3 = i0 + 3
+#if defined(__CUDA)
            vq_d (ig) = ux * vx * (wx * tab_d(i0, nb, nt) + px * tab_d(i3, nb, nt)) / 6.d0 + &
                        px * wx * (vx * tab_d(i1, nb, nt) - ux * tab_d(i2, nb, nt)) * 0.5d0
+#else
+              vq_d (ig) = ux * vx * (wx * tab(i0, nb, nt) + px * tab(i3, nb, nt)) / 6.d0 + &
+                          px * wx * (vx * tab(i1, nb, nt) - ux * tab(i2, nb, nt)) * 0.5d0
+#endif
 
         enddo
 
@@ -146,6 +164,7 @@ SUBROUTINE init_us_2_base_gpu( npw_, npwx, igk__d, q_, nat, tau, ityp, &
               lm =nhtolm (ih, nt)
 
               !$cuf kernel do(1) <<<*,*>>>
+              !$omp target teams distribute parallel do
               do ig = 1, npw_
                  vkb1_d (ig,ih) = ylm_d (ig, lm) * vq_d (ig)
               enddo
@@ -167,6 +186,7 @@ SUBROUTINE init_us_2_base_gpu( npw_, npwx, igk__d, q_, nat, tau, ityp, &
            phase = CMPLX(cos (arg), - sin (arg) ,kind=DP)
            !
            !$cuf kernel do(1) <<<*,*>>>
+           !$omp target teams distribute parallel do
            do ig = 1, npw_
               sk_d (ig) = eigts1_d (mill_d(1,igk__d(ig)), na) * &
                           eigts2_d (mill_d(2,igk__d(ig)), na) * &
@@ -177,10 +197,12 @@ SUBROUTINE init_us_2_base_gpu( npw_, npwx, igk__d, q_, nat, tau, ityp, &
               jkb = jkb + 1
               pref = (0.d0, -1.d0) **nhtol (ih, nt) * phase
               !$cuf kernel do(1) <<<*,*>>>
+              !$omp target teams distribute parallel do
               do ig = 1, npw_
                  vkb__d(ig, jkb) = vkb1_d (ig,ih) * sk_d (ig) * pref
               enddo
               !$cuf kernel do(1) <<<*,*>>>
+              !$omp target teams distribute parallel do
               do ig = npw_+1, npwx
                  vkb__d(ig, jkb) = (0.0_dp, 0.0_dp)
               enddo

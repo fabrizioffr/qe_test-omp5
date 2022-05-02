@@ -17,6 +17,8 @@ MODULE klist
   !
   SAVE
   !
+  !$omp declare target(igk_k, ngk)
+  !
   !FIXME !TODO variables as igk_k, mill, g and others persist in the device memory
   ! for the whole duration of the run, their allocation in the device should be
   ! done using !$acc declare create () instead of using !$acc enter/exit data create/delete().
@@ -47,6 +49,7 @@ MODULE klist
   !! index of G corresponding to a given index of k+G
   INTEGER, ALLOCATABLE :: ngk(:)
   !! number of plane waves for each k point
+#if !defined (__OPENMP_GPU)
   INTEGER, ALLOCATABLE :: igk_k_d(:,:)
   !! device copy of igk
   INTEGER, ALLOCATABLE :: ngk_d(:)
@@ -54,6 +57,7 @@ MODULE klist
 #if defined (__CUDA)
   attributes(DEVICE) :: igk_k_d, ngk_d
   attributes(PINNED) :: igk_k
+#endif
 #endif
   !
   INTEGER :: nks
@@ -91,6 +95,7 @@ CONTAINS
     !
     IF (.NOT.ALLOCATED(igk_k)) ALLOCATE( igk_k(npwx,nks) )
     !$acc enter data create(igk_k(1:npwx,1:nks))
+    !$omp target enter data map(alloc:igk_k)
     !
     IF (.NOT.ALLOCATED(ngk))   ALLOCATE( ngk(nks) )
     !
@@ -104,6 +109,7 @@ CONTAINS
        CALL gk_sort( xk(1,ik), ngm, g, gcutw, ngk(ik), igk_k(1,ik), gk )
     ENDDO
     !$acc update device(igk_k)
+    !$omp target update to(igk_k)
     !
     DEALLOCATE( gk )
 #if defined (__CUDA)
@@ -119,11 +125,14 @@ CONTAINS
     !
     IF (ALLOCATED(ngk))     DEALLOCATE( ngk )
     !
+    !$omp target exit data map(delete:igk_k)
     !$acc exit data delete(igk_k)
     IF (ALLOCATED(igk_k))   DEALLOCATE( igk_k )
+#if !defined(__OPENMP_GPU)
     IF (ALLOCATED(igk_k_d)) DEALLOCATE( igk_k_d )
     !
     IF (ALLOCATED(ngk_d))   DEALLOCATE( ngk_d )
+#endif
     !
   END SUBROUTINE deallocate_igk
   !
@@ -158,7 +167,7 @@ MODULE lsda_mod
   INTEGER :: isk(npk)
   !! for each k-point: 1=spin up, 2=spin down
   REAL(DP),ALLOCATABLE  :: local_charges(:), local_mag(:,:)
-  !! used to store the local charges and magnetizatiom computed in report_mag 
+  !! used to store the local charges and magnetizatiom computed in report_mag
   !! (e.g. for printing them in the XML file)
   !
 END MODULE lsda_mod
@@ -286,6 +295,7 @@ MODULE wvfct
   !
   SAVE
   !
+  !$omp declare target(g2kin,et,wg)
   INTEGER ::  npwx
   !! maximum number of PW for wavefunctions
   INTEGER ::  nbndx
@@ -465,21 +475,21 @@ MODULE fixed_occ
 END MODULE fixed_occ
 !
 !
-MODULE pw_interfaces 
-  USE kinds, ONLY: DP 
-  IMPLICIT NONE 
-  PUBLIC 
-  INTERFACE 
+MODULE pw_interfaces
+  USE kinds, ONLY: DP
+  IMPLICIT NONE
+  PUBLIC
+  INTERFACE
     SUBROUTINE report_mag(save_locals)
       !! This subroutine prints out information about the local magnetization
       !! and/or charge, integrated around the atomic positions at points which
       !! are calculated in make_pointlists.
       LOGICAL,OPTIONAL,INTENT(IN) :: save_locals
-      !! if present and true locals are saved into local_charges and local_mod of lsda_mod 
-    END SUBROUTINE 
-  END INTERFACE 
-END MODULE pw_interfaces 
-! 
+      !! if present and true locals are saved into local_charges and local_mod of lsda_mod
+    END SUBROUTINE
+  END INTERFACE
+END MODULE pw_interfaces
+!
 MODULE pwcom
   !
   USE klist
@@ -491,6 +501,6 @@ MODULE pwcom
   USE relax
   USE cellmd
   USE fixed_occ
-  USE pw_interfaces 
+  USE pw_interfaces
   !
 END MODULE pwcom

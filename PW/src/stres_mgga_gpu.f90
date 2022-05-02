@@ -22,7 +22,7 @@ SUBROUTINE stres_mgga_gpu( sigmaxc )
   USE klist,                  ONLY : nks, xk, ngk
   USE buffers,                ONLY : get_buffer
   USE io_files,               ONLY : iunwfc, nwordwfc
-  USE wvfct,                  ONLY : nbnd, npwx, wg 
+  USE wvfct,                  ONLY : nbnd, npwx, wg
   USE lsda_mod,               ONLY : lsda, nspin, current_spin, isk
   USE fft_interfaces,         ONLY : fwfft, invfft
   USE fft_base,               ONLY : dfftp, dffts
@@ -31,10 +31,9 @@ SUBROUTINE stres_mgga_gpu( sigmaxc )
   USE mp_bands,               ONLY : intra_bgrp_comm
   USE wavefunctions_gpum,     ONLY : using_evc
   !
-#if defined(__CUDA)
-  USE device_fbuff_m ,              ONLY : dev_buf
-  USE device_memcpy_m,          ONLY : dev_memcpy, dev_memset
-#endif
+  USE devxlib_buffers,        ONLY : dev_buf => gpu_buffer
+  USE devxlib_memset,         ONLY : dev_memset => devxlib_memory_set
+  USE devxlib_memcpy,         ONLY : memcpy_h2d => devxlib_memcpy_h2d
   !
   IMPLICIT NONE
   !
@@ -58,6 +57,8 @@ SUBROUTINE stres_mgga_gpu( sigmaxc )
   !
 #if defined(__CUDA)
   attributes(DEVICE) :: gradwfc_d, crosstaus_d, vkin_d, rhokin_d, ix_d, iy_d
+#endif
+#if defined(__CUDA) || defined(__OPENMP_GPU)
   !
   if ( .not. xclib_dft_is('meta') ) return
   !
@@ -97,7 +98,7 @@ SUBROUTINE stres_mgga_gpu( sigmaxc )
     !
     npw = ngk(ik)
     !
-    ! Read the wavefunctions 
+    ! Read the wavefunctions
     !
     IF ( nks > 1 ) THEN
        CALL get_buffer( evc, nwordwfc, iunwfc, ik )
@@ -108,7 +109,7 @@ SUBROUTINE stres_mgga_gpu( sigmaxc )
        !
        ! w1, w2: weights for each k point and band
        !
-       w1 = wg(ibnd,ik) / omega 
+       w1 = wg(ibnd,ik) / omega
        !
        IF ( (ibnd < nbnd) .AND. (gamma_only) ) THEN
           !
@@ -121,15 +122,16 @@ SUBROUTINE stres_mgga_gpu( sigmaxc )
           w2 = w1
           !
        ENDIF
-       !       
+       !
        ! Gradient of the wavefunction in real space
-       ! 
+       !
        CALL wfc_gradient_gpu( ibnd, ik, npw, gradwfc_d )
        !
        ! Cross terms of kinetic energy density
        !
        ! FIX ME: PGI complains here if I set do(2)
        !$cuf kernel do (1) <<<*,*>>>
+       !$omp target teams distribute parallel do
        DO ir = 1, dffts%nnr
          DO ipol = 1, 6
             !
@@ -152,15 +154,18 @@ SUBROUTINE stres_mgga_gpu( sigmaxc )
        !
     ENDDO !ibnd
     !
-  ENDDO k_loop 
+  ENDDO k_loop
   !
   !
   CALL dev_buf%release_buffer( gradwfc_d, ierrs(1) )
   !
+  !$omp dispatch
   CALL mp_sum( crosstaus_d, inter_pool_comm )
   !
+#if !defined(__OPENMP_GPU)
   CALL dev_buf%lock_buffer( vkin_d, dffts%nnr, ierrs(3) )
   CALL dev_buf%lock_buffer( rhokin_d, dffts%nnr, ierrs(4) )
+#endif
   IF (ANY(ierrs(3:4) /= 0)) CALL errore( 'stres_mgga_gpu', 'cannot allocate buffers', ABS(MAXVAL(ierrs(3:4)))  )
   !
   ! metagga contribution to the stress tensor
@@ -171,10 +176,33 @@ SUBROUTINE stres_mgga_gpu( sigmaxc )
   sigma3_d = 0.d0 ;  sigma6_d = 0.d0
   !
   !
-  DO iss = 1, nspin 
+  DO iss = 1, nspin
      !
-     CALL dev_memcpy( vkin_d, v%kin_r(:,iss) )
-     CALL dev_memcpy( rhokin_d, rho%kin_r(:,iss) )
+#if defined(__OPENMP_GPU)
+     !$omp target teams distribute parallel do map(to:v%kin_r(:,iss), rho%kin_r(:,iss)) &
+     !$omp & reduction(+:sigma1_d) &
+     !$omp & reduction(+:sigma2_d) &
+     !$omp & reduction(+:sigma3_d) &
+     !$omp & reduction(+:sigma4_d) &
+     !$omp & reduction(+:sigma5_d) &
+     !$omp & reduction(+:sigma6_d)
+     DO ir = 1, dffts%nnr
+         !
+         sigma1_d = sigma1_d + v%kin_r(ir,iss) * (rho%kin_r(ir,iss) &
+                             + DBLE(crosstaus_d(ir,1,iss)) )
+         sigma2_d = sigma2_d + v%kin_r(ir,iss) * DBLE(crosstaus_d(ir,2,iss))
+         sigma3_d = sigma3_d + v%kin_r(ir,iss) * DBLE(crosstaus_d(ir,3,iss))
+         sigma4_d = sigma4_d + v%kin_r(ir,iss) * (rho%kin_r(ir,iss) &
+                             + DBLE(crosstaus_d(ir,4,iss)) )
+         sigma5_d = sigma5_d + v%kin_r(ir,iss) * DBLE(crosstaus_d(ir,5,iss))
+         sigma6_d = sigma6_d + v%kin_r(ir,iss) * (rho%kin_r(ir,iss) &
+                             + DBLE(crosstaus_d(ir,6,iss)) )
+         !
+     ENDDO
+     !$omp end target teams distribute parallel do
+#else
+     CALL memcpy_h2d( vkin_d, v%kin_r(:,iss) )
+     CALL memcpy_h2d( rhokin_d, rho%kin_r(:,iss) )
      !
      !$cuf kernel do (1) <<<*,*>>>
      DO ir = 1, dffts%nnr
@@ -190,6 +218,7 @@ SUBROUTINE stres_mgga_gpu( sigmaxc )
                              + DBLE(crosstaus_d(ir,6,iss)) )
          !
      ENDDO
+#endif
      !
   ENDDO
   !
@@ -199,8 +228,10 @@ SUBROUTINE stres_mgga_gpu( sigmaxc )
   sigma_mgga(2,1) = sigma2_d  ;  sigma_mgga(3,3) = sigma6_d
   sigma_mgga(2,2) = sigma4_d
   !
+#if !defined(__OPENMP_GPU)
   CALL dev_buf%release_buffer( vkin_d, ierrs(3) )
   CALL dev_buf%release_buffer( rhokin_d, ierrs(4) )
+#endif
   CALL dev_buf%release_buffer( crosstaus_d, ierrs(2) )
   !
   CALL mp_sum( sigma_mgga, intra_bgrp_comm )
@@ -218,26 +249,37 @@ END SUBROUTINE stres_mgga_gpu
 SUBROUTINE wfc_gradient_gpu( ibnd, ik, npw, gradpsi_d )
   !----------------------------------------------------------
   !! Returns the gradient of the wavefunction in real space.
-  !! Slightly adapted from sum_bands.f90 
+  !! Slightly adapted from sum_bands.f90
   !
-  USE kinds,                  ONLY: DP
-  USE control_flags,          ONLY: gamma_only
-  USE wvfct,                  ONLY: npwx, nbnd
-  USE cell_base,              ONLY: omega, tpiba
-  USE klist,                  ONLY: xk, igk_k_d
-  
-  USE fft_base,               ONLY: dffts
-  USE fft_interfaces,         ONLY: invfft
+  USE kinds,                  ONLY : DP
+  USE control_flags,          ONLY : gamma_only
+  USE wvfct,                  ONLY : npwx, nbnd
+  USE cell_base,              ONLY : omega, tpiba
+#if defined(__OPENMP_GPU)
+  USE klist,                  ONLY : xk, igk_k
+#else
+  USE klist,                  ONLY : xk, igk_k_d
+#endif
+
+  USE fft_base,               ONLY : dffts
+  USE fft_interfaces,         ONLY : invfft
   !
-  USE gvect,                  ONLY: g_d
-  USE wavefunctions_gpum,     ONLY: using_evc, using_evc_d, evc_d, &
-                                    using_psic, using_psic_d, psic_d
-#if defined(__CUDA)
-  USE device_fbuff_m,               ONLY: dev_buf
-  USE device_memcpy_m,          ONLY: dev_memcpy
-#endif  
+#if defined(__OPENMP_GPU)
+  USE omp_lib
+  USE gvect,                  ONLY : g
+  USE wavefunctions,          ONLY : evc, psic
+  USE dmr,                    ONLY : omp_target_init, omp_target_memcpy_f
+#else
+  USE gvect_gpum,             ONLY : g_d
+  USE wavefunctions_gpum,     ONLY : evc_d, psic_d
+#endif
+  USE wavefunctions_gpum,     ONLY : using_evc, using_evc_d, using_psic, using_psic_d
+#if defined(__CUDA) || defined(__OPENMP_GPU)
+  USE devxlib_buffers,        ONLY : dev_buf => gpu_buffer
+  USE devxlib_memcpy,         ONLY : memcpy_d2d => devxlib_memcpy_d2d
+#endif
   !
-  IMPLICIT NONE 
+  IMPLICIT NONE
   !
   INTEGER, INTENT(IN) :: ibnd, ik, npw
   COMPLEX(DP), INTENT(OUT) :: gradpsi_d(dffts%nnr,3)
@@ -246,19 +288,27 @@ SUBROUTINE wfc_gradient_gpu( ibnd, ik, npw, gradpsi_d )
   !
   INTEGER  :: ipol, j
   REAL(DP) :: kplusg
+#if !defined(__OPENMP_GPU)
   INTEGER, POINTER :: nl_d(:), nlm_d(:)
+#endif
   REAL(DP) :: xk_d(3)
   !
 #if defined(__CUDA)
   attributes(DEVICE) :: gradpsi_d, nl_d, nlm_d, xk_d
+#endif
+#if defined(__CUDA) || defined(__OPENMP_GPU)
   !
   CALL using_evc_d(0)
   CALL using_psic_d(2)
   !
+#if defined(__OPENMP_GPU)
+  !$omp target enter data map(to:igk_k(:,ik), xk(1:3,ik))
+#else
   nl_d    => dffts%nl_d
   nlm_d   => dffts%nlm_d
   !
   xk_d(1:3) = xk(1:3,ik)
+#endif
   !
   ! Compute the gradient of the wavefunction in reciprocal space
   !
@@ -266,12 +316,31 @@ SUBROUTINE wfc_gradient_gpu( ibnd, ik, npw, gradpsi_d )
      !
      DO ipol = 1, 3
         !
+#if defined(__OPENMP_GPU)
+        call omp_target_init(array=psic, val=(0._DP,0._DP))
+#else
         psic_d(:) = (0._DP,0._DP)
+#endif
         !
         IF ( ibnd < nbnd ) THEN
            !
            ! ... two ffts at the same time
            !
+#if defined(__OPENMP_GPU)
+           !$omp target teams distribute parallel do
+           DO j = 1, npw
+              kplusg = (xk(ipol,ik)+g(ipol,igk_k(j,ik))) * tpiba
+              !
+              psic(dffts%nl(j))  = CMPLX(0._DP, kplusg, kind=DP) * &
+                                   ( evc(j,ibnd) + &
+                                   ( 0._DP, 1._DP ) * evc(j,ibnd+1) )
+              !
+              psic(dffts%nlm(j)) = CMPLX(0._DP,-kplusg, kind=DP) * &
+                                    CONJG( evc(j,ibnd) - &
+                                    ( 0._DP, 1._DP ) * evc(j,ibnd+1) )
+           ENDDO
+           !$omp end target teams distribute parallel do
+#else
            !$cuf kernel do (1) <<<*,*>>>
            DO j = 1, npw
               kplusg = (xk_d(ipol)+g_d(ipol,igk_k_d(j,ik))) * tpiba
@@ -284,9 +353,23 @@ SUBROUTINE wfc_gradient_gpu( ibnd, ik, npw, gradpsi_d )
                                     CONJG( evc_d(j,ibnd) - &
                                     ( 0._DP, 1._DP ) * evc_d(j,ibnd+1) )
            ENDDO
+#endif
            !
         ELSE
            !
+#if defined(__OPENMP_GPU)
+           !$omp target teams distribute parallel do
+           DO j = 1, npw
+              kplusg = (xk(ipol,ik)+g(ipol,igk_k(j,ik))) * tpiba
+              !
+              psic(dffts%nl(j))  = CMPLX(0._DP, kplusg, kind=DP) * &
+                                       evc(j,ibnd)
+              !
+              psic(dffts%nlm(j)) = CMPLX(0._DP,-kplusg,kind=DP) * &
+                                       CONJG( evc(j,ibnd) )
+           ENDDO
+           !$omp end target teams distribute parallel do
+#else
            !$cuf kernel do (1) <<<*,*>>>
            DO j = 1, npw
               kplusg = (xk_d(ipol)+g_d(ipol,igk_k_d(j,ik))) * tpiba
@@ -297,39 +380,65 @@ SUBROUTINE wfc_gradient_gpu( ibnd, ik, npw, gradpsi_d )
               psic_d(nlm_d(j)) = CMPLX(0._DP,-kplusg,kind=DP) * &
                                        CONJG( evc_d(j,ibnd) )
            ENDDO
+#endif
            !
         ENDIF
         !
         ! Gradient of the wavefunction in real space
         !
+#if defined(__OPENMP_GPU)
+        !$omp dispatch
+        CALL invfft( 2, psic, dffts )
+        !call omp_target_memcpy_f(fptr_dst=gradpsi_d(:,ipol), fptr_src=psic, ierr=ierr, dst_off=0, src_off=0, &
+        !                         omp_dst_dev=omp_device, omp_src_dev=omp_device)
+        CALL memcpy_d2d( gradpsi_d(:,ipol), psic )
+#else
         CALL invfft( 'Wave', psic_d, dffts )
         !
-        CALL dev_memcpy( gradpsi_d(:,ipol), psic_d )
-        !
+        CALL memcpy_d2d( gradpsi_d(:,ipol), psic_d )
+#endif
      ENDDO
      !
   ELSE
-     !     
+     !
      DO ipol = 1, 3
          !
+#if defined(__OPENMP_GPU)
+         call omp_target_init(array=psic, val=(0._DP,0._DP))
+#else
          psic_d(:) = (0._DP,0._DP)
+#endif
          !
          !$cuf kernel do(1) <<<*,*>>>
+         !$omp target teams distribute parallel do
          DO j = 1, npw
-            kplusg = (xk_d(ipol)+g_d(ipol,igk_k_d(j,ik))) * tpiba
+#if defined(__OPENMP_GPU)
+            kplusg = (xk(ipol,ik)+g(ipol,igk_k(j,ik))) * tpiba
+            !
+            psic(dffts%nl(j)) = CMPLX(0._DP,kplusg,kind=DP)*evc(j,ibnd)
+#else
+            kplusg = (xk_d(ipol)+g_d(ipol,igk_k_d(j))) * tpiba
             !
             psic_d(nl_d(j)) = CMPLX(0._DP,kplusg,kind=DP)*evc_d(j,ibnd)
+#endif
          ENDDO
          !
          ! Gradient of the wavefunction in real space
          !
+#if defined(__OPENMP_GPU)
+         !$omp dispatch
+         CALL invfft( 2, psic, dffts )
+         !call omp_target_memcpy_f(fptr_dst=gradpsi_d(:,ipol), fptr_src=psic, ierr=ierr, dst_off=0, src_off=0, &
+         !                         omp_dst_dev=omp_device, omp_src_dev=omp_device)
+         CALL memcpy_d2d( gradpsi_d(:,ipol), psic )
+#else
          CALL invfft( 'Wave', psic_d, dffts )
          !
-         CALL dev_memcpy( gradpsi_d(:,ipol), psic_d )
-         !
-     ENDDO 
+         CALL memcpy_d2d( gradpsi_d(:,ipol), psic_d )
+#endif
+     ENDDO
      !
   ENDIF
-#endif  
+#endif
   !
 END SUBROUTINE wfc_gradient_gpu
