@@ -21,16 +21,13 @@ SUBROUTINE g2_kin_gpu ( ik )
 #else
                                    igk_k
 #endif
-  USE wvfct_gpum,           ONLY : &
-#if !defined(__OPENMP_GPU)
-                                   g2kin_d, &
-#endif
-                                   using_g2kin_d
+  USE wvfct_gpum,           ONLY : using_g2kin_d
 #if defined(__OPENMP_GPU)
   USE gvect,                ONLY : g
   USE wvfct,                ONLY : g2kin
 #else
   USE gvect,                ONLY : g_d
+  USE wvfct_gpum,           ONLY : g2kin_d
 #endif
   !
   IMPLICIT NONE
