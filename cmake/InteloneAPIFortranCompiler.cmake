@@ -14,7 +14,7 @@ if(QE_ENABLE_OPENMP_OFFLOAD)
     list(APPEND QE_OMP_OFFLOAD_COMPILE_OPTIONS -fiopenmp -fopenmp-targets=spir64)
     #
     set(QE_OMP_OFFLOAD_LINK_OPTIONS)
-    list(APPEND QE_OMP_OFFLOAD_LINK_OPTIONS -fsycl -lsycl -lOpenCL -lmkl_sycl -liomp5)
+    list(APPEND QE_OMP_OFFLOAD_LINK_OPTIONS -qmkl -fsycl -lsycl -lOpenCL -lmkl_sycl -liomp5)
     message("   Checking ifx OpenMP Offload related compile options: ${QE_OMP_OFFLOAD_COMPILE_OPTIONS}")
     message("   Checking ifx OpenMP Offload related link options: ${QE_OMP_OFFLOAD_LINK_OPTIONS}")
     # Checking of linking options fails
