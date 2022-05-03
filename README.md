@@ -46,7 +46,7 @@ After devXlib has been compiled, this repository can be cloned and compiled usin
 
 ```
 git clone https://github.com/QEF/qe_test-omp5.git
-cd qe_test_omp5
+cd qe_test-omp5
 git checkout <main or devel>
 mkdir ./build
 cd ./build
