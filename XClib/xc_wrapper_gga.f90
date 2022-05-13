@@ -68,19 +68,25 @@ SUBROUTINE xc_gcx( length, ns, rho, grho, ex, ec, v1x, v2x, v1c, v2c, v2c_ud, &
     !
   ELSE
     !
+    !$omp target data map(to:rho,grho) map(from:ex,ec,v1x,v2x,v1c,v2c)
     !$acc data copyin( rho, grho ), copyout( ex, ec, v1x, v2x, v1c, v2c )
     IF (PRESENT(v2c_ud)) THEN
+      !$omp target data map(from:v2c_ud)
       !$acc data copyout( v2c_ud )
       CALL xc_gcx_( length, ns, rho, grho, ex, ec, v1x, v2x, v1c, v2c, v2c_ud )
       !$acc end data
+      !$omp end target data
     ELSE
       ALLOCATE( v2c_dummy(length) )
+      !$omp target data map(alloc:v2c_ud)
       !$acc data create( v2c_dummy )
       CALL xc_gcx_( length, ns, rho, grho, ex, ec, v1x, v2x, v1c, v2c, v2c_dummy )
       !$acc end data
+      !$omp end target data
       DEALLOCATE( v2c_dummy )
     ENDIF
     !$acc end data
+    !$omp end target data
     !
   ENDIF  
   !
@@ -420,11 +426,14 @@ SUBROUTINE xc_gcx_( length, ns, rho, grho, ex, ec, v1x, v2x, v1c, v2c, v2c_ud )
   !
   ALLOCATE( grho2(length,ns) )
   !$acc data create( grho2 )
+  !$omp target data map(alloc:grho2)
   !
   IF ( ns == 1 ) THEN
      !
      ALLOCATE( rh(length) )
      !$acc data create( rh )
+     !$omp target data map(alloc:rh)
+     !$omp target teams distribute parallel do
      !$acc parallel loop
      DO k = 1, length
         rh(k) = ABS(rho(k,1))
@@ -433,6 +442,7 @@ SUBROUTINE xc_gcx_( length, ns, rho, grho, ex, ec, v1x, v2x, v1c, v2c, v2c_ud )
      !
      CALL gcxc( length, rh, grho2(:,1), ex, ec, v1x(:,1), v2x(:,1), v1c(:,1), v2c(:,1) )
      !
+     !$omp target teams distribute parallel do
      !$acc parallel loop
      DO k = 1, length
         sgn1 = SIGN(1._DP, rho(k,1))
@@ -440,11 +450,13 @@ SUBROUTINE xc_gcx_( length, ns, rho, grho, ex, ec, v1x, v2x, v1c, v2c, v2c_ud )
         ec(k) = ec(k) * sgn1
      ENDDO
      !
+     !$omp end target data
      !$acc end data
      DEALLOCATE( rh )
      !
   ELSE
      !
+     !$omp target teams distribute parallel do collapse(2)
      !$acc parallel loop collapse(2)
      DO is = 1, ns
        DO k = 1, length
@@ -458,6 +470,8 @@ SUBROUTINE xc_gcx_( length, ns, rho, grho, ex, ec, v1x, v2x, v1c, v2c, v2c_ud )
         !
         ALLOCATE( grho_ud(length) )
         !$acc data create( grho_ud )
+        !$omp target data map(alloc:grho_ud)
+        !$omp target teams distribute parallel do
         !$acc parallel loop
         DO k = 1, length
           grho_ud(k) = grho(1,k,1) * grho(1,k,2) + grho(2,k,1) * grho(2,k,2) + &
@@ -466,6 +480,7 @@ SUBROUTINE xc_gcx_( length, ns, rho, grho, ex, ec, v1x, v2x, v1c, v2c, v2c_ud )
         !
         CALL gcc_spin_more( length, rho, grho2, grho_ud, ec, v1c, v2c, v2c_ud )
         !
+        !$omp end target data
         !$acc end data
         DEALLOCATE( grho_ud )
         !
@@ -473,6 +488,8 @@ SUBROUTINE xc_gcx_( length, ns, rho, grho, ex, ec, v1x, v2x, v1c, v2c, v2c_ud )
         !
         ALLOCATE( rh(length), zeta(length) )
         !$acc data create( rh, zeta )
+        !$omp target data map(alloc:rh,zeta)
+        !$omp target teams distribute parallel do
         !$acc parallel loop
         DO k = 1, length
           rh(k) = rho(k,1) + rho(k,2)
@@ -488,12 +505,14 @@ SUBROUTINE xc_gcx_( length, ns, rho, grho, ex, ec, v1x, v2x, v1c, v2c, v2c_ud )
         !
         CALL gcc_spin( length, rh, zeta, grho2(:,1), ec, v1c, v2c(:,1) )
         !
+        !$omp target teams distribute parallel do
         !$acc parallel loop
         DO k = 1, length
           v2c(k,2)  = v2c(k,1)
           IF ( ns==2 ) v2c_ud(k) = v2c(k,1)
         ENDDO
         !
+        !$omp end target data
         !$acc end data
         DEALLOCATE( rh, zeta )
         !
@@ -501,6 +520,7 @@ SUBROUTINE xc_gcx_( length, ns, rho, grho, ex, ec, v1x, v2x, v1c, v2c, v2c_ud )
      !
   ENDIF
   !
+  !$omp end target data
   !$acc end data
   DEALLOCATE( grho2 )
   !
