@@ -25,6 +25,8 @@ SUBROUTINE pz( rs, iflag, ec, vc )
   !
   IMPLICIT NONE
   !
+!$omp declare target
+  !
   INTEGER, INTENT(IN) :: iflag
   !! see routine comments
   REAL(DP), INTENT(IN) :: rs
@@ -45,8 +47,6 @@ SUBROUTINE pz( rs, iflag, ec, vc )
   DATA gc / -0.1423d0, -0.103756d0 /, b1 / 1.0529d0, 0.56371d0 /, &
        b2 /  0.3334d0,  0.27358d0  /
   !
-!$omp declare target
-
   IF ( rs < 1.0d0 ) THEN
      !
      ! high density formula
@@ -87,6 +87,8 @@ SUBROUTINE pzKZK( rs, ec, vc, vol )
   !
   IMPLICIT NONE
   !
+!$omp declare target
+  !
   REAL(DP), INTENT(IN) :: rs
   !! Wigner-Seitz radius
   REAL(DP), INTENT(OUT) :: ec
@@ -116,8 +118,6 @@ SUBROUTINE pzKZK( rs, ec, vc, vol )
        g4 / -1.1233_DP /
   !
   DATA ry2h / 0.5_DP /
-  !
-! $ omp declare target
   !
   iflag = 1
   pi = 4.d0 * ATAN(1.d0)
@@ -150,10 +150,12 @@ SUBROUTINE pzKZK( rs, ec, vc, vol )
      !
      grs  = g1 * rsk * lnrsk + g2 * rsk + g3 * rsk**1.5d0 + g4 * rsk**2.d0
      grsp = g1 * lnrsk + g1 + g2 + 1.5d0 * g3 * rsk**0.5d0 + 2.d0 * g4 * rsk
+     !grs = 1.d0
+     !grsp = 1.d0
      !
-     ec0(kr)  = ec0(kr) + (-a1 * rsk / dL**2.d0 + grs / dL**3.d0) * ry2h
+     ec0(kr)  = ec0(kr) + (-a1 * rsk / dL**2.d0 + grs / dL**3) * ry2h
      vc0(kr)  = vc0(kr) + (-2.d0 * a1 * rsk / dL**2.d0 / 3.d0 + &
-           grs / dL**3.d0 -  grsp * rsk / 3.d0 / dL**3.d0) * ry2h
+           grs / dL**3 -  grsp * rsk / 3.d0 / dL**3) * ry2h
      !
      rsk = rs
      !
@@ -171,14 +173,14 @@ SUBROUTINE pzKZK( rs, ec, vc, vol )
         P2 = ec0p
         D1 = gl - gh
         D2 = gl**2.d0 - gh**2.d0
-        D3 = gl**3.d0 - gh**3.d0
+        D3 = gl**3 - gh**3
         f2 = 2.d0 * gl**2.d0 * P2 * D1 + D2 * P1
         f2 = f2 / (-(2.d0*gl*D1)**2.d0 + 4.d0*gl*D1*D2 - D2**2.d0 )
         f3 = - (P2 + 2.d0*D1*f2) / (3.d0 * D2)
         f1 = - (P1 + D2 * f2) / (2.d0 * D1)
         f0 = - gl * (gl * f2 + 2.d0 * f1) / 3.d0
         !
-        ec = f3 * rs**3.d0 + f2 * rs**2.d0 + f1 * rs + f0
+        ec = f3 * rs**3 + f2 * rs**2.d0 + f1 * rs + f0
         vc = f2 * rs**2.d0 / 3.d0 + f1 * 2.d0 * rs / 3.d0 + f0
      ELSE
         ec = 0.d0
@@ -202,6 +204,8 @@ SUBROUTINE vwn( rs, ec, vc )
   !
   IMPLICIT NONE
   !
+!$omp declare target
+  !
   REAL(DP), INTENT(IN) :: rs
   !! Wigner-Seitz radius
   REAL(DP), INTENT(OUT) :: ec
@@ -214,8 +218,6 @@ SUBROUTINE vwn( rs, ec, vc )
   REAL(DP), PARAMETER :: a = 0.0310907d0, b = 3.72744d0, &
                          c = 12.9352d0, x0 = -0.10498d0
   REAL(DP) :: q, f1, f2, f3, rs12, fx, qx, tx, tt
-  !
-!$omp declare target
   !
   q  = SQRT( 4.d0*c - b*b )
   f1 = 2.d0*b/q
@@ -250,6 +252,8 @@ SUBROUTINE vwn1_rpa( rs, ec, vc )
   !
   IMPLICIT NONE
   !
+!$omp declare target
+  !
   REAL(DP), INTENT(IN) :: rs
   !! Wigner-Seitz radius
   REAL(DP), INTENT(OUT) :: ec
@@ -263,8 +267,6 @@ SUBROUTINE vwn1_rpa( rs, ec, vc )
                          c = 42.7198_DP, x0 = -0.409286_DP
   REAL(DP) :: q, f1, f2, f3, rs12, fx, qx, tx, tt
   !
-!$omp declare target
-
   q  = SQRT(4.d0*c - b*b)
   f1 = 2.d0*b/q
   f2 = b*x0 / (x0*x0 + b*x0 + c)
@@ -299,6 +301,8 @@ SUBROUTINE lyp( rs, ec, vc )
   !
   IMPLICIT NONE
   !
+!$omp declare target
+  !
   REAL(DP), INTENT(IN) :: rs
   !! Wigner-Seitz radius
   REAL(DP), INTENT(OUT) :: ec
@@ -313,8 +317,6 @@ SUBROUTINE lyp( rs, ec, vc )
   !                      pi43=(4pi/3)^(1/3)
   REAL(DP), PARAMETER :: c=0.2533d0*pi43, d=0.349d0*pi43
   REAL(DP) :: ecrs, ox
-  !
-!$omp declare target
   !
   ecrs = b*EXP( -c*rs )
   ox = 1.d0 / (1.d0 + d*rs)
@@ -338,6 +340,8 @@ SUBROUTINE pw( rs, iflag, ec, vc )
   !
   IMPLICIT NONE
   !
+!$omp declare target
+  !
   REAL(DP), INTENT(IN) :: rs
   !! Wigner-Seitz radius
   INTEGER, INTENT(IN)  :: iflag
@@ -360,8 +364,6 @@ SUBROUTINE pw( rs, iflag, ec, vc )
   ! high- and low-density formulae implemented but not used in PW case
   ! (reason: inconsistencies in PBE/PW91 functionals).
   !
-!$omp declare target
-
   IF ( rs < 1d0 .AND. iflag == 2 ) THEN
      !
      ! high density formula
@@ -410,6 +412,8 @@ SUBROUTINE wignerc( rs, ec, vc )
   !
   IMPLICIT NONE
   !
+!$omp declare target
+  !
   REAL(DP), INTENT(IN) :: rs
   !! Wigner-Seitz radius
   REAL(DP), INTENT(OUT) :: ec
@@ -422,8 +426,6 @@ SUBROUTINE wignerc( rs, ec, vc )
   REAL(DP) :: rho13 !rho13=rho^(1/3)
   REAL(DP), PARAMETER :: pi34 = 0.6203504908994d0
   !                      pi34 = (3/4pi)^(1/3)
-  !
-!$omp declare target
   !
   rho13 = pi34 / rs
   vc = - rho13 * ( (0.943656d0 + 8.8963d0 * rho13) / (1.d0 + &
@@ -445,6 +447,8 @@ SUBROUTINE hl( rs, ec, vc )
   !
   IMPLICIT NONE
   !
+!$omp declare target
+  !
   REAL(DP), INTENT(IN) :: rs
   !! Wigner-Seitz radius
   REAL(DP), INTENT(OUT) :: ec
@@ -455,8 +459,6 @@ SUBROUTINE hl( rs, ec, vc )
   ! ... local variables
   !
   REAL(DP) :: a, x
-  !
-!$omp declare target
   !
   a = LOG(1.0d0 + 21.d0/rs)
   x = rs / 21.0d0
@@ -479,6 +481,8 @@ SUBROUTINE gl( rs, ec, vc )
   !
   IMPLICIT NONE
   !
+!$omp declare target
+  !
   REAL(DP), INTENT(IN) :: rs
   !! Wigner-Seitz radius
   REAL(DP), INTENT(OUT) :: ec
@@ -491,8 +495,7 @@ SUBROUTINE gl( rs, ec, vc )
   REAL(DP) :: x
   REAL(DP), PARAMETER :: c=0.0333d0, r=11.4d0
   !                      c=0.0203,   r=15.9   for the paramagnetic case
-!$omp declare target
-
+  !
   x = rs / r
   vc = - c * LOG(1.d0 + 1.d0 / x)
   ec = - c * ( (1.d0 + x**3) * LOG(1.d0 + 1.d0 / x) - 1.0d0 / &
@@ -515,6 +518,8 @@ SUBROUTINE pz_polarized( rs, ec, vc )
   USE kind_l, ONLY : DP
   !
   IMPLICIT NONE
+  !
+!$omp declare target
   !
   REAL(DP), INTENT(IN) :: rs
   !! Wigner-Seitz radius
@@ -571,6 +576,8 @@ SUBROUTINE pz_spin( rs, zeta, ec, vc_up, vc_dw )
   !
   IMPLICIT NONE
   !
+!$omp declare target
+  !
   REAL(DP), INTENT(IN) :: rs
   !! Wigner-Seitz radius
   REAL(DP), INTENT(IN) :: zeta
@@ -614,6 +621,8 @@ SUBROUTINE vwn_spin( rs, zeta, ec, vc_up, vc_dw )
    USE kind_l,     ONLY: DP
    !
    IMPLICIT NONE
+   !
+!$omp declare target
    !
    REAL(DP), INTENT(IN) :: rs
    !! Wigner-Seitz radius
@@ -694,6 +703,8 @@ SUBROUTINE padefit_ParSet1( x, i, fit, dfit )
    !
    IMPLICIT NONE
    !
+!$omp declare target
+   !
    REAL(DP) :: x
    !! input: x is SQRT(r_s)
    INTEGER :: i
@@ -744,6 +755,8 @@ SUBROUTINE padefit_ParSet2( x, i, fit, dfit )
    USE kind_l, ONLY: DP
    !
    IMPLICIT NONE
+   !
+!$omp declare target
    !
    REAL(DP) :: x
    !! input: x is SQRT(r_s)
@@ -796,6 +809,8 @@ SUBROUTINE vwn1_rpa_spin( rs, zeta, ec, vc_up, vc_dw )
    USE kind_l, ONLY: DP
    !
    IMPLICIT NONE
+   !
+!$omp declare target
    !
    REAL(DP), INTENT(IN) :: rs
    !! Wigner-Seitz radius
@@ -873,6 +888,8 @@ SUBROUTINE pw_spin( rs, zeta, ec, vc_up, vc_dw )
   USE kind_l, ONLY : DP
   !
   IMPLICIT NONE
+  !
+!$omp declare target
   !
   REAL(DP), INTENT(IN) :: rs
   !! Wigner-Seitz radius
@@ -985,6 +1002,8 @@ SUBROUTINE lsd_lyp( rho, zeta, elyp, vlyp_up, vlyp_dw )
   !
   IMPLICIT NONE
   !
+!$omp declare target
+  !
   REAL(DP), INTENT(IN) :: rho
   !! total charge density
   REAL(DP), INTENT(IN) :: zeta
@@ -1009,7 +1028,7 @@ SUBROUTINE lsd_lyp( rho, zeta, elyp, vlyp_up, vlyp_dw )
   dr = (1.D0+d*rm3)
   !
   e1 = 4.D0*a*ra*rb/rho/dr
-  or = EXP(-c*rm3)/dr*rm3**11.D0
+  or = EXP(-c*rm3)/dr*rm3**11
   dor= -1.D0/3.D0*rm3**4*or*(11.D0/rm3-c-d/dr)
   e2 = 2.D0**(11.D0/3.D0)*cf*a*b*or*ra*rb*(ra**(8.d0/3.d0)+ rb**(8.d0/3.d0))
   !
