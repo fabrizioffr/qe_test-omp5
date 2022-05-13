@@ -33,6 +33,9 @@ SUBROUTINE slater( rs, ex, vx )
   !
   REAL(DP), PARAMETER   :: f = -0.687247939924714_DP, alpha = 2.0_DP/3.0_DP
   !                        f = -9/8*(3/2pi)^(2/3)
+
+!$omp declare target
+
   ex = f * alpha / rs
   vx = 4._DP / 3._DP * f * alpha / rs
   !
@@ -63,6 +66,8 @@ SUBROUTINE slater1( rs, ex, vx )
   !
   REAL(DP), PARAMETER   :: f = -0.687247939924714d0, alpha = 1.0d0
   !
+!$omp declare target
+
   ex = f * alpha / rs
   vx = 4.d0 / 3.d0 * f * alpha / rs
   !
@@ -96,6 +101,8 @@ SUBROUTINE slater_rxc( rs, ex, vx )
   REAL(DP) :: trd, ftrd, tftm, a0, alp, z, fz, fzp, vxp, xp, &
               beta, sb, alb, c014
   !
+!$omp declare target
+
   trd  = one/3.d0
   ftrd = 4.d0*trd
   tftm = 2**ftrd-2.d0
@@ -142,7 +149,7 @@ SUBROUTINE slaterKZK( rs, ex, vx, vol )
   !! Exchange energy (per unit volume)
   REAL(DP), INTENT(OUT) :: vx
   !! Exchange potential
-  REAL(DP) :: vol
+  REAL(DP), INTENT(IN) :: vol
   !! Finite size volume element
   !
   ! ... local variables
@@ -152,7 +159,8 @@ SUBROUTINE slaterKZK( rs, ex, vx, vol )
                          a2 = 0.4710d0, a3 = -0.015d0, ry2h = 0.5d0
   REAL(DP), PARAMETER :: f = -0.687247939924714d0, alpha = 2.0d0/3.0d0
   !                      f = -9/8*(3/2pi)^(2/3)
-  !
+!$omp declare target
+
   pi = 4.d0 * ATAN(1.d0)
   a0 = f * alpha * 2.d0
   !

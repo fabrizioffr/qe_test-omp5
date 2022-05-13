@@ -45,6 +45,8 @@ SUBROUTINE pz( rs, iflag, ec, vc )
   DATA gc / -0.1423d0, -0.103756d0 /, b1 / 1.0529d0, 0.56371d0 /, &
        b2 /  0.3334d0,  0.27358d0  /
   !
+!$omp declare target
+
   IF ( rs < 1.0d0 ) THEN
      !
      ! high density formula
@@ -114,6 +116,8 @@ SUBROUTINE pzKZK( rs, ec, vc, vol )
        g4 / -1.1233_DP /
   !
   DATA ry2h / 0.5_DP /
+  !
+! $ omp declare target
   !
   iflag = 1
   pi = 4.d0 * ATAN(1.d0)
@@ -211,6 +215,7 @@ SUBROUTINE vwn( rs, ec, vc )
                          c = 12.9352d0, x0 = -0.10498d0
   REAL(DP) :: q, f1, f2, f3, rs12, fx, qx, tx, tt
   !
+!$omp declare target
   !
   q  = SQRT( 4.d0*c - b*b )
   f1 = 2.d0*b/q
@@ -258,6 +263,8 @@ SUBROUTINE vwn1_rpa( rs, ec, vc )
                          c = 42.7198_DP, x0 = -0.409286_DP
   REAL(DP) :: q, f1, f2, f3, rs12, fx, qx, tx, tt
   !
+!$omp declare target
+
   q  = SQRT(4.d0*c - b*b)
   f1 = 2.d0*b/q
   f2 = b*x0 / (x0*x0 + b*x0 + c)
@@ -307,6 +314,7 @@ SUBROUTINE lyp( rs, ec, vc )
   REAL(DP), PARAMETER :: c=0.2533d0*pi43, d=0.349d0*pi43
   REAL(DP) :: ecrs, ox
   !
+!$omp declare target
   !
   ecrs = b*EXP( -c*rs )
   ox = 1.d0 / (1.d0 + d*rs)
@@ -352,6 +360,8 @@ SUBROUTINE pw( rs, iflag, ec, vc )
   ! high- and low-density formulae implemented but not used in PW case
   ! (reason: inconsistencies in PBE/PW91 functionals).
   !
+!$omp declare target
+
   IF ( rs < 1d0 .AND. iflag == 2 ) THEN
      !
      ! high density formula
@@ -413,6 +423,7 @@ SUBROUTINE wignerc( rs, ec, vc )
   REAL(DP), PARAMETER :: pi34 = 0.6203504908994d0
   !                      pi34 = (3/4pi)^(1/3)
   !
+!$omp declare target
   !
   rho13 = pi34 / rs
   vc = - rho13 * ( (0.943656d0 + 8.8963d0 * rho13) / (1.d0 + &
@@ -445,6 +456,7 @@ SUBROUTINE hl( rs, ec, vc )
   !
   REAL(DP) :: a, x
   !
+!$omp declare target
   !
   a = LOG(1.0d0 + 21.d0/rs)
   x = rs / 21.0d0
@@ -479,7 +491,8 @@ SUBROUTINE gl( rs, ec, vc )
   REAL(DP) :: x
   REAL(DP), PARAMETER :: c=0.0333d0, r=11.4d0
   !                      c=0.0203,   r=15.9   for the paramagnetic case
-  !
+!$omp declare target
+
   x = rs / r
   vc = - c * LOG(1.d0 + 1.d0 / x)
   ec = - c * ( (1.d0 + x**3) * LOG(1.d0 + 1.d0 / x) - 1.0d0 / &
