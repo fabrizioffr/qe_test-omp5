@@ -46,9 +46,11 @@ SUBROUTINE xc( length, srd, svd, rho_in, ex_out, ec_out, vx_out, vc_out, gpu_arg
     !
   ELSE
     !
+    !$omp target data map(to:rho_in) map(from:ex_out,ec_out,vx_out,vc_out)
     !$acc data copyin( rho_in ), copyout( ex_out, ec_out, vx_out, vc_out )
     CALL xc_( length, srd, svd, rho_in, ex_out, ec_out, vx_out, vc_out )
     !$acc end data
+    !$omp end target data
     !
   ENDIF
   !
@@ -274,12 +276,15 @@ SUBROUTINE xc_( length, srd, svd, rho_in, ex_out, ec_out, vx_out, vc_out )
      !
      ALLOCATE( zeta(length) )
      !$acc data create( zeta )
+     !$omp target data map(alloc:zeta)
+     !$omp target teams distribute parallel do
      !$acc parallel loop
      DO ir = 1, length
        arho_ir = ABS(rho_in(ir,1))
        IF (arho_ir > rho_threshold_lda) zeta(ir) = rho_in(ir,2) / arho_ir
      ENDDO
      CALL xc_lsda( length, rho_in(:,1), zeta, ex_out, ec_out, vx_out, vc_out )
+     !$omp end target data
      !$acc end data
      DEALLOCATE( zeta )
      !
@@ -287,6 +292,8 @@ SUBROUTINE xc_( length, srd, svd, rho_in, ex_out, ec_out, vx_out, vc_out )
      !
      ALLOCATE( zeta(length) )
      !$acc data create( zeta )
+     !$omp target data map(alloc:zeta)
+     !$omp target teams distribute parallel do
      !$acc parallel loop
      DO ir = 1, length
        arho_ir = ABS(rho_in(ir,1))
@@ -294,6 +301,7 @@ SUBROUTINE xc_( length, srd, svd, rho_in, ex_out, ec_out, vx_out, vc_out )
                                                        rho_in(ir,4)**2 ) / arho_ir ! amag/arho
      ENDDO
      CALL xc_lsda( length, rho_in(:,1), zeta, ex_out, ec_out, vx_out, vc_out )
+     !$omp end target data
      !$acc end data
      DEALLOCATE( zeta )
      !

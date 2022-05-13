@@ -87,12 +87,13 @@ SUBROUTINE xc_lda( length, rho_in, ex_out, ec_out, vx_out, vc_out )
   !
   ntids = omp_get_num_threads()
 #endif
-  !
+!
 #if defined(_OPENACC)
 !$acc data present( rho_in, ex_out, vx_out, ec_out, vc_out )
 !$acc parallel loop
 #elif defined(__OPENMP_GPU)
-!$omp target data map(to:rho_in) map(from:ex_out,vx_out,ec_out,vc_out)
+!! $ omp target data map(to:rho_in) map(from:ex_out,vx_out,ec_out,vc_out)
+!! $ omp target data use_device_ptr(rho_in(:),ex_out(:),vx_out(:),ec_out(:),vc_out(:))
 !$omp target teams distribute parallel do
 #else
 !$omp parallel if(ntids==1) default(none) &
@@ -259,7 +260,6 @@ SUBROUTINE xc_lda( length, rho_in, ex_out, ec_out, vx_out, vc_out )
 #if defined(_OPENACC)
 !$acc end data
 #elif defined(__OPENMP_GPU)
-!$omp end target data
 #else
 !$omp end do
 !$omp end parallel
@@ -322,7 +322,6 @@ SUBROUTINE xc_lsda( length, rho_in, zeta_in, ex_out, ec_out, vx_out, vc_out )
 !$acc data present( rho_in, zeta_in, ex_out, vx_out, ec_out, vc_out )
 !$acc parallel loop  
 #elif defined(__OPENMP_GPU)
-!$omp target data map(to:rho_in,zeta_in) map(from:ex_out,vx_out,ec_out,vc_out)
 !$omp target teams distribute parallel do
 #else
 !$omp parallel if(ntids==1) default(none) &
@@ -484,7 +483,6 @@ SUBROUTINE xc_lsda( length, rho_in, zeta_in, ex_out, ec_out, vx_out, vc_out )
 #if defined(_OPENACC)
 !$acc end data
 #elif defined(__OPENMP_GPU)
-!$omp end target data
 #else
 !$omp end do
 !$omp end parallel
