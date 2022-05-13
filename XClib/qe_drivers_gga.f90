@@ -500,6 +500,9 @@ SUBROUTINE gcx_spin( length, rho_in, grho2_in, sx_tot, v1x_out, v2x_out )
 #if defined(_OPENACC)
 !$acc data present( rho_in, grho2_in, sx_tot, v1x_out, v2x_out )
 !$acc parallel loop
+#elif(__OPENMP_GPU)
+!$omp target data map(to:rho_in,grho2_in) map(from:sx_tot,v1x_out,v2x_out)
+!$omp target teams distribute parallel do
 #else
 !$omp parallel if(ntids==1) default(none) &
 !$omp private( rho_up, rho_dw, grho2_up, grho2_dw, rnull_up, rnull_dw, &
@@ -964,8 +967,8 @@ SUBROUTINE gcx_spin( length, rho_in, grho2_in, sx_tot, v1x_out, v2x_out )
         rho_up = 2.0_DP * rho_up     ; rho_dw = 2.0_DP * rho_dw
         grho2_up = 4.0_DP * grho2_up ; grho2_dw = 4.0_DP * grho2_dw
         !
-        CALL beefx( rho_up, grho2_up, sx_up, v1x_up, v2x_up, 0 )
-        CALL beefx( rho_dw, grho2_dw, sx_dw, v1x_dw, v2x_dw, 0 )
+    !    CALL beefx( rho_up, grho2_up, sx_up, v1x_up, v2x_up, 0 )
+    !    CALL beefx( rho_dw, grho2_dw, sx_dw, v1x_dw, v2x_dw, 0 )
         !
         sx_tot(ir) = 0.5_DP * (sx_up*rnull_up + sx_dw*rnull_dw)
         v2x_up = 2.0_DP * v2x_up
@@ -987,6 +990,8 @@ SUBROUTINE gcx_spin( length, rho_in, grho2_in, sx_tot, v1x_out, v2x_out )
   ENDDO
 #if defined(_OPENACC)
 !$acc end data
+#elif(__OPENMP_GPU)
+!$omp end target data
 #else
 !$omp end do
 !$omp end parallel

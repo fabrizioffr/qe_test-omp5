@@ -1563,6 +1563,8 @@ SUBROUTINE becke88_spin( rho_up, rho_dw, grho_up, grho_dw, sx_up, sx_dw, v1x_up,
   !
   IMPLICIT NONE
   !
+  !$omp declare target
+  !
   REAL(DP), INTENT(IN) :: rho_up, rho_dw
   !! charge
   REAL(DP), INTENT(IN) :: grho_up, grho_dw
@@ -1583,7 +1585,7 @@ SUBROUTINE becke88_spin( rho_up, rho_dw, grho_up, grho_dw, sx_up, sx_dw, v1x_up,
   !
   !DO is = 1, 2
      rho13 = rho_up**third
-     rho43 = rho13**4
+     rho43 = rho13*rho13*rho13*rho13
      xs  = SQRT(grho_up) / rho43
      xs2 = xs * xs
      sa2b8 = SQRT(1.0d0 + xs2)
@@ -1596,7 +1598,7 @@ SUBROUTINE becke88_spin( rho_up, rho_dw, grho_up, grho_dw, sx_up, sx_dw, v1x_up,
      v2x_up = beta * (ee-dd) / (rho43*dd2)
 
      rho13 = rho_dw**third
-     rho43 = rho13**4
+     rho43 = rho13*rho13*rho13*rho13
      xs  = SQRT(grho_dw) / rho43
      xs2 = xs * xs
      sa2b8 = SQRT(1.0d0 + xs2)
