@@ -82,7 +82,10 @@ SUBROUTINE gcxc( length, rho_in, grho_in, sx_out, sc_out, v1x_out, &
   !
 #if defined(_OPENACC)
 !$acc data present( rho_in, grho_in, sx_out, sc_out, v1x_out, v2x_out, v1c_out, v2c_out )
-!$acc parallel loop  
+!$acc parallel loop
+#elif defined(__OPENMP_GPU)
+!$omp target data map(to:rho_in,grho_in) map(from:sx_out,sc_out,v1x_out,v2x_out,v1c_out,v2c_out)
+!$omp target teams distribute parallel do
 #else
 !$omp parallel if(ntids==1) default(none) &
 !$omp private( rho, grho, sx, sx_, sxsr, v1x, v1x_, v1xsr, &
@@ -148,9 +151,9 @@ SUBROUTINE gcxc( length, rho_in, grho_in, sx_out, sc_out, v1x_out, &
         !
         CALL becke88( rho, grho, sx, v1x, v2x )
         IF (exx_started) THEN
-           sx  = 0.72_DP * sx
-           v1x = 0.72_DP * v1x
-           v2x = 0.72_DP * v2x
+          sx  = 0.72_DP * sx
+          v1x = 0.72_DP * v1x
+          v2x = 0.72_DP * v2x
         ENDIF
         !
      CASE( 10 ) ! 'pbesol'
@@ -183,7 +186,7 @@ SUBROUTINE gcxc( length, rho_in, grho_in, sx_out, sc_out, v1x_out, &
            iflag = 2 ! AHPS for PBEsol-based cross check
         ENDIF
         !
-        IF ( iflag == 0) STOP ! CALL xclib_error( " gcxc ", " Sorting GGA-AHs failed ", 1)
+        IF ( iflag == 0) CYCLE !STOP ! CALL xclib_error( " gcxc ", " Sorting GGA-AHs failed ", 1)
         !
         IF (exx_started) THEN
           CALL axsr( iflag, rho, grho, sxsr, v1xsr, v2xsr, screening_parameter )
@@ -202,11 +205,11 @@ SUBROUTINE gcxc( length, rho_in, grho_in, sx_out, sc_out, v1x_out, &
            CALL rPW86( rho, grho, sx, v1x, v2x )
            iflag = 4 ! for rPW86 - analytical sr hole
         ELSEIF ( igcx == 47) THEN ! vdW-DF2-ahtr
-           CALL b86b( rho, grho, 3, sx, v1x, v2x ) 
+           CALL b86b( rho, grho, 3, sx, v1x, v2x )
            iflag = 6 ! for test-reserve - analytical sr hole
         ENDIF
         !
-        IF ( iflag == 0) STOP ! CALL xclib_error( " gcxc ", " Sorting vdW-DF-AHs failed ", 1)
+        IF ( iflag == 0) CYCLE !STOP ! CALL xclib_error( " gcxc ", " Sorting vdW-DF-AHs failed ", 1)
         !
         IF (exx_started) THEN
           CALL axsr( iflag, rho, grho, sxsr, v1xsr, v2xsr, screening_parameter )
@@ -288,7 +291,7 @@ SUBROUTINE gcxc( length, rho_in, grho_in, sx_out, sc_out, v1x_out, &
         !
         CALL cx13( rho, grho, sx, v1x, v2x )
         IF (exx_started) THEN
-           sx  = (1.0_DP - exx_fraction) * sx
+            sx  = (1.0_DP - exx_fraction) * sx
            v1x = (1.0_DP - exx_fraction) * v1x
            v2x = (1.0_DP - exx_fraction) * v2x
         ENDIF
@@ -341,7 +344,7 @@ SUBROUTINE gcxc( length, rho_in, grho_in, sx_out, sc_out, v1x_out, &
         !
      CASE( 43 ) ! 'BEEX'
         !
-        CALL beefx( rho, grho, sx, v1x, v2x, 0 )
+!        CALL beefx( rho, grho, sx, v1x, v2x, 0 )
         !
      CASE( 44 ) ! 'RPBE'
         !
@@ -417,7 +420,7 @@ SUBROUTINE gcxc( length, rho_in, grho_in, sx_out, sc_out, v1x_out, &
      CASE( 14 ) !'BEEC'
         ! last parameter 0 means: do not add lda contributions
         ! espresso will do that itself
-        CALL beeflocalcorr( rho, grho, sc, v1c, v2c, 0 )
+!        CALL beeflocalcorr( rho, grho, sc, v1c, v2c, 0 )
         !
      CASE DEFAULT
         !
@@ -434,6 +437,8 @@ SUBROUTINE gcxc( length, rho_in, grho_in, sx_out, sc_out, v1x_out, &
   ENDDO
 #if defined(_OPENACC)
 !$acc end data
+#elif defined(__OPENMP_GPU)
+!$omp end target data
 #else
 !$omp end do
 !$omp end parallel
@@ -868,7 +873,7 @@ SUBROUTINE gcx_spin( length, rho_in, grho2_in, sx_tot, v1x_out, v2x_out )
         ENDIF
         !
         IF ( iflag == 0) THEN
-           STOP ! CALL xclib_error( " gcx_spin ", " Sorting vdW-DF-AHs failed ", 1)
+           CYCLE !STOP ! CALL xclib_error( " gcx_spin ", " Sorting vdW-DF-AHs failed ", 1)
         ELSE
           sx_tot(ir) = 0.5_DP * ( sx_up*rnull_up + sx_dw*rnull_dw )
           v2x_up = 2.0_DP * v2x_up

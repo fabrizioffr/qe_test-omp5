@@ -25,6 +25,8 @@ SUBROUTINE perdew86( rho, grho, sc, v1c, v2c )
   !
   IMPLICIT NONE
   !
+  !$omp declare target
+  !
   REAL(DP), INTENT(IN) :: rho, grho
   REAL(DP), INTENT(OUT) :: sc, v1c, v2c
   !
@@ -76,6 +78,8 @@ SUBROUTINE ggac( rho, grho, sc, v1c, v2c )
   USE kind_l,    ONLY: DP
   !
   IMPLICIT NONE
+  !
+  !$omp declare target
   !
   REAL(DP), INTENT(IN) :: rho, grho
   REAL(DP), INTENT(OUT) :: sc, v1c, v2c
@@ -156,6 +160,8 @@ SUBROUTINE glyp( rho, grho, sc, v1c, v2c )
   !
   IMPLICIT NONE
   !
+  !$omp declare target
+  !
   REAL(DP), INTENT(IN) :: rho, grho
   REAL(DP), INTENT(OUT) :: sc, v1c, v2c
   !
@@ -165,22 +171,26 @@ SUBROUTINE glyp( rho, grho, sc, v1c, v2c )
                          d=0.349_DP
   REAL(DP) :: rhom13, rhom43, rhom53, om, xl, ff, dom, dxl
   !
+  integer :: ag
+
   rhom13 = rho**(-1._DP/3._DP)
   om = EXP(-c*rhom13) / (1._DP+d*rhom13)
-  xl = 1._DP + (7._DP/3._DP) * ( c*rhom13 + d * rhom13 / (1._DP + &
-                                 d * rhom13) )
+
+  xl = 1.d0 + 7.d0/3.d0 * ( c*rhom13 + d * rhom13 / (1._DP + &
+                            d * rhom13) )
   ff = a * b * grho / 24._DP
-  rhom53 = rhom13**5
+  !
+  rhom53 = rhom13**2*rhom13**2*rhom13  !provisional - probably omp5 bug
   !
   sc = ff * rhom53 * om * xl
   !
   dom = - om * (c + d+c * d * rhom13) / (1.d0 + d * rhom13)
   dxl = (7.d0 / 3.d0) * (c + d+2.d0 * c * d * rhom13 + c * d * d * &
        rhom13**2) / (1.d0 + d * rhom13) **2
-  rhom43 = rhom13**4
+  rhom43 = rhom13**2.d0*rhom13**2.d0  !provisional (see previous comment)
   !
   v1c = - ff * rhom43 / 3.d0 * ( 5.d0 * rhom43 * om * xl + rhom53 * &
-                                    dom * xl + rhom53 * om * dxl )
+                                 dom * xl + rhom53 * om * dxl )
   v2c = 2.d0 * sc / grho
   !
   RETURN
@@ -201,6 +211,8 @@ SUBROUTINE pbec( rho, grho, iflag, sc, v1c, v2c )
   USE kind_l,    ONLY: DP
   !
   IMPLICIT NONE
+  !
+  !$omp declare target
   !
   INTEGER,  INTENT(IN) :: iflag
   REAL(DP), INTENT(IN) :: rho, grho
@@ -622,6 +634,8 @@ SUBROUTINE cpbe2d( rho, grho, sc, v1c, v2c )
   !
   IMPLICIT NONE
   !
+  !$omp declare target
+  !
   REAL(DP), INTENT(IN)  :: rho, grho
   REAL(DP), INTENT(OUT) :: sc, v1c, v2c
   !
@@ -668,16 +682,16 @@ SUBROUTINE cpbe2d( rho, grho, sc, v1c, v2c )
   beta4  = 0.49294d0
   G = -0.2D1 * A * DBLE(1 + alpha1 * rs) * LOG(0.1D1 + 0.1D1 / A / ( &
   beta1 * SQRT(DBLE(rs)) + DBLE(beta2 * rs) + DBLE(beta3 * rs ** (   &
-  0.3D1 / 0.2D1)) + DBLE(beta4 * rs ** (p + 1))) / 0.2D1)
+  0.3D1 / 0.2D1)) + DBLE(beta4 * rs ** INT(p + 1))) / 0.2D1)
   !
   dGdrs = -0.2D1 * A * alpha1 * LOG(0.1D1 + 0.1D1 / A / (beta1 * SQRT(rs) &
    + beta2 * rs + beta3 * rs ** (0.3D1 / 0.2D1) + beta4 * rs **           &
-  (p + 1)) / 0.2D1) + (0.1D1 + alpha1 * rs) / (beta1 * SQRT(rs) +         &
-  beta2 * rs + beta3 * rs ** (0.3D1 / 0.2D1) + beta4 * rs ** (p + 1))     &
+  INT(p + 1)) / 0.2D1) + (0.1D1 + alpha1 * rs) / (beta1 * SQRT(rs) +      &
+  beta2 * rs + beta3 * rs ** (0.3D1 / 0.2D1) + beta4 * rs ** INT(p + 1))  &
   ** 2 * (beta1 * rs ** (-0.1D1 / 0.2D1) / 0.2D1 + beta2 + 0.3D1 /        &
-  0.2D1 * beta3 * SQRT(rs) + beta4 * rs ** (p + 1) * DBLE(p + 1) /        &
+  0.2D1 * beta3 * SQRT(rs) + beta4 * rs **INT(p + 1) * DBLE(p + 1) /      &
   rs) / (0.1D1 + 0.1D1 / A / (beta1 * SQRT(rs) + beta2 * rs + beta3 *     &
-  rs ** (0.3D1 / 0.2D1) + beta4 * rs ** (p + 1)) / 0.2D1)
+  rs ** (0.3D1 / 0.2D1) + beta4 * rs **INT(p + 1)) / 0.2D1)
   !
   epsc = G
   depscdrs = dGdrs
