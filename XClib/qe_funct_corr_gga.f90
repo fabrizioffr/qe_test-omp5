@@ -280,6 +280,8 @@ SUBROUTINE perdew86_spin( rho, zeta, grho, sc, v1c_up, v1c_dw, v2c )
   !
   IMPLICIT NONE
   !
+  !$omp declare target
+  !
   REAL(DP), INTENT(IN) :: rho
   !! the total charge density
   REAL(DP), INTENT(IN) :: zeta
@@ -351,6 +353,8 @@ SUBROUTINE ggac_spin( rho, zeta, grho, sc, v1c_up, v1c_dw, v2c )
   USE kind_l, ONLY: DP
   !
   IMPLICIT NONE
+  !
+  !$omp declare target
   !
   REAL(DP), INTENT(IN) :: rho
   !! the total charge density
@@ -461,6 +465,8 @@ SUBROUTINE pbec_spin( rho, zeta, grho, iflag, sc, v1c_up, v1c_dw, v2c )
   !
   IMPLICIT NONE
   !
+  !$omp declare target
+  !
   INTEGER, INTENT(IN) :: iflag
   !! see main comments
   REAL(DP), INTENT(IN) :: rho
@@ -555,6 +561,8 @@ SUBROUTINE lsd_glyp( rho_in_up, rho_in_dw, grho_up, grho_dw, grho_ud, sc, v1c_up
   USE kind_l, ONLY: DP
   !
   IMPLICIT NONE
+  !
+  !$omp declare target
   !
   REAL(DP), INTENT(IN) :: rho_in_up, rho_in_dw
   !! the total charge density

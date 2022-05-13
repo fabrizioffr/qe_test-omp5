@@ -1046,6 +1046,9 @@ SUBROUTINE gcc_spin( length, rho_in, zeta_io, grho_in, sc_out, v1c_out, v2c_out 
 #if defined(_OPENACC)
 !$acc data present( rho_in, zeta_io, grho_in, sc_out, v1c_out, v2c_out )
 !$acc parallel loop
+#elif defined(__OPENMP_GPU)
+!$omp target data map(to:rho_in,grho_in) map(tofrom:zeta_io) map(from:sc_out,v1c_out,v2c_out)
+!$omp target teams distribute parallel do
 #else
 !$omp parallel if(ntids==1) default(none) &
 !$omp private( rho, zeta, grho, sc, v1c_up, v1c_dw, v2c ) &
@@ -1096,7 +1099,7 @@ SUBROUTINE gcc_spin( length, rho_in, zeta_io, grho_in, sc_out, v1c_out, v2c_out 
        !
     CASE( 14 )
        !  
-       CALL beeflocalcorrspin( rho, zeta, grho, sc, v1c_up, v1c_dw, v2c, 0 )
+!       CALL beeflocalcorrspin( rho, zeta, grho, sc, v1c_up, v1c_dw, v2c, 0 )
        !
     CASE DEFAULT
        !
@@ -1115,6 +1118,8 @@ SUBROUTINE gcc_spin( length, rho_in, zeta_io, grho_in, sc_out, v1c_out, v2c_out 
   ENDDO
 #if defined(_OPENACC)
 !$acc end data
+#elif defined(__OPENMP_GPU)
+!$omp end target data
 #else
 !$omp end do
 !$omp end parallel
@@ -1175,6 +1180,9 @@ SUBROUTINE gcc_spin_more( length, rho_in, grho_in, grho_ud_in, &
 #if defined(_OPENACC) 
 !$acc data present( rho_in, grho_in, grho_ud_in, sc, v1c, v2c, v2c_ud )
 !$acc parallel loop
+#elif defined(__OPENMP_GPU)
+!$omp target data map(to:rho_in,grho_in,grho_ud_in) map(from:sc,v1c,v2c,v2c_ud)
+!$omp target teams distribute parallel do
 #else 
 !$omp parallel if(ntids==1) default(none) &
 !$omp private( rho_up, rho_dw, grho_up, grho_dw, grho_ud ) &
@@ -1239,6 +1247,8 @@ SUBROUTINE gcc_spin_more( length, rho_in, grho_in, grho_ud_in, &
   ENDDO
 #if defined(_OPENACC)
 !$acc end data
+#elif defined(__OPENMP_GPU)
+!$omp end target data
 #else
 !$omp end do
 !$omp end parallel
