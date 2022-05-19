@@ -87,6 +87,9 @@ SUBROUTINE dmxc_lda( length, rho_in, dmuxc )
     !
 #if defined(_OPENACC)
 !$acc parallel loop
+#elif defined(__OPNMP_GPU)
+!$omp target data map(to:rho_in) map(from:dmuxc)
+!$omp target teams distribute parallel do
 #else
 !$omp parallel if(ntids==1) default(none) &
 !$omp private( rs, rho, ex_s, vx_s , iflg ) &
@@ -115,6 +118,8 @@ SUBROUTINE dmxc_lda( length, rho_in, dmuxc )
 #if !defined(_OPENACC)
 !$omp end do
 !$omp end parallel
+#elif defined(__OPENMP_GPU)
+!$omp end target data
 #endif
      !
   ELSE
@@ -145,7 +150,13 @@ SUBROUTINE dmxc_lda( length, rho_in, dmuxc )
        rhoaux(i2-1+ir) = arho(ir)-dr(ir)
      ENDDO
      !
+#if defined(__OPENMP_GPU)
+     !$omp target data map(to:rhoaux) map(alloc:ex,ec) map(from:vx,vc)
+#endif
      CALL xc_lda( length*2, rhoaux, ex, ec, vx, vc )
+#if defined(__OPENMP_GPU)
+     !$omp end target data
+#endif
      !
      !$acc parallel loop
      DO ir = 1, length
@@ -242,6 +253,9 @@ SUBROUTINE dmxc_lsda( length, rho_in, dmuxc )
      !
 #if defined(_OPENACC)
      !$acc parallel loop
+#elif defined(__OPENMP_GPU)
+     !$omp target data map(to:rho_in,rhotot) map(from:dmuxc)
+     !$omp target teams distribute parallel do
 #else
      !$omp parallel do default(none) &
      !$omp shared(length, rhotot, rho_in, dmuxc ) &
@@ -306,6 +320,9 @@ SUBROUTINE dmxc_lsda( length, rho_in, dmuxc )
                                                (1.0_DP + zeta_s)**2 * cc ) * e2
                     
      ENDDO
+#if defined(__OPENMP_GPU)
+     !$omp end target data
+#endif
      !
   ELSE
      !
@@ -353,7 +370,13 @@ SUBROUTINE dmxc_lsda( length, rho_in, dmuxc )
        rhoaux(i4-1+ir) = rhotot(ir)         ;  zetaux(i4-1+ir) = zeta_eff(ir)-dz(ir)
      ENDDO
      !
+#if defined(__OPENMP_GPU)
+     !$omp target data map(to:rhoaux,zetaux) map(alloc:aux1,aux2) map(from:vx,vc)
+#endif
      CALL xc_lsda( length*4, rhoaux, zetaux, aux1, aux2, vx, vc )
+#if defined(__OPENMP_GPU)
+     !$omp end target data
+#endif
      !
      !$acc parallel loop
      DO ir = 1, length
@@ -488,7 +511,13 @@ SUBROUTINE dmxc_nc( length, rho_in, m, dmuxc )
      rhoaux(i5-1+i) = rhotot(i)        ;  zetaux(i5-1+i) = zeta_eff-dz(i)
   ENDDO
   !
+#if defined(__OPENMP_GPU)
+  !$omp target data map(to:rhoaux,zetaux) map(alloc:aux1,aux2) map(from:vx,vc)
+#endif
   CALL xc_lsda( length*5, rhoaux, zetaux, aux1, aux2, vx, vc )
+#if defined(__OPENMP_GPU)
+  !$omp end target data
+#endif
   !
   !$acc parallel loop
   DO i = 1, length
@@ -605,6 +634,8 @@ FUNCTION dpz( rs, iflg )
   !
   IMPLICIT NONE
   !
+  !$omp declare target
+  !
   REAL(DP), INTENT(IN) :: rs
   INTEGER,  INTENT(IN) :: iflg
   REAL(DP) :: dpz
@@ -645,6 +676,8 @@ FUNCTION dpz_polarized( rs, iflg )
   USE constants_l, ONLY: pi, fpi
   !
   IMPLICIT NONE
+  !
+  !$omp declare target
   !
   REAL(DP), INTENT(IN) :: rs
   INTEGER,  INTENT(IN) :: iflg

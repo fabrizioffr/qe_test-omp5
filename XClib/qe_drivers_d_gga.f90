@@ -97,7 +97,13 @@ SUBROUTINE dgcxc_unpol( length, r_in, s2_in, vrrx, vsrx, vssx, vrrc, vsrc, vssc 
     raux(i4-1+ir) = r_in(ir)         ;   s2aux(i4-1+ir) = (s(ir)-ds(ir))**2
   ENDDO
   !
+#if defined(__OPENMP_GPU)
+  !$omp target data map(to:raux,s2aux) map(alloc:sx,sc) map(from:v1x,v2x,v1c,v2c)
+#endif
   CALL gcxc( length*4, raux, s2aux, sx, sc, v1x, v2x, v1c, v2c )
+#if defined(__OPENMP_GPU)
+  !$omp end target data
+#endif
   !
   !$acc parallel loop
   DO ir = 1, length
@@ -253,7 +259,13 @@ SUBROUTINE dgcxc_spin( length, r_in, g_in, vrrx, vrsx, vssx, vrrc, vrsc, &
     raux(i8-1+ir,2) = r_dw        ;  s2aux(i8-1+ir,2) = (s_dw-ds_dw)**2
   ENDDO
   !
+#if defined(__OPENMP_GPU)
+  !$omp target data map(to:raux,s2aux) map(alloc:sx) map(from:v1x,v2x)
+#endif
   CALL gcx_spin( length*8, raux, s2aux, sx, v1x, v2x )
+#if defined(__OPENMP_GPU)
+  !$omp end target data
+#endif
   !
   !$acc parallel loop
   DO ir = 1, length
@@ -344,7 +356,13 @@ SUBROUTINE dgcxc_spin( length, r_in, g_in, vrrx, vrsx, vssx, vrrc, vrsc, &
     rtaux(i6-1+ir) = rt     ; s2taux(i6-1+ir) = s2t            ; zetaux(i6-1+ir) = zeta-dz
   ENDDO
   !
+#if defined(__OPENMP_GPU)
+  !$omp target data map(to:rtaux,zetaux,s2taux) map(alloc:sc) map(from:v1c,v2c)
+#endif
   CALL gcc_spin( length*6, rtaux, zetaux, s2taux, sc, v1c, v2c )
+#if defined(__OPENMP_GPU)
+  !$omp end target data
+#endif
   !
   !$acc parallel loop
   DO ir = 1, length
