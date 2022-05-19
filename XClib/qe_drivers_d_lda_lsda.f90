@@ -87,7 +87,7 @@ SUBROUTINE dmxc_lda( length, rho_in, dmuxc )
     !
 #if defined(_OPENACC)
 !$acc parallel loop
-#elif defined(__OPNMP_GPU)
+#elif defined(__OPENMP_GPU)
 !$omp target data map(to:rho_in) map(from:dmuxc)
 !$omp target teams distribute parallel do
 #else

@@ -154,8 +154,11 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
      CALL xc_gcx( dfftp_nnr, nspin0, rhoaux, grho, sx, sc, v1x, v2x, v1c, v2c, &
                   gpu_args_=.TRUE. )
      !
-     !$omp target teams distribute parallel do reduction(+:etxcgc,vtxcgc)
+#if defined(_OPENACC)
      !$acc parallel loop reduction(+:etxcgc) reduction(+:vtxcgc)
+#elif defined(_OPENMP_GPU)
+     !$omp target teams distribute parallel do reduction(+:etxcgc,vtxcgc)
+#endif
      DO k = 1, dfftp_nnr
         ! ... first term of the gradient correction : D(rho*Exc)/D(rho)
         v(k,1) = v(k,1) + e2 * ( v1x(k,1) + v1c(k,1) )
@@ -174,9 +177,10 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
      ! ... spin-polarised case
      !
      ALLOCATE( v2c_ud(dfftp%nnr) )
-     !$acc data create( v2c_ud )
      !
-#if defined(__OPENMP_GPU)
+#if defined(_OPENACC)
+     !$acc data create( v2c_ud )
+#elif defined(__OPENMP_GPU)
      !$omp target data map(alloc:v2c_ud)
 #endif
      CALL xc_gcx( dfftp_nnr, nspin0, rhoaux, grho, sx, sc, v1x, v2x, v1c, v2c, &
@@ -184,8 +188,11 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
      !
      ! ... h contains D(rho*Exc)/D(|grad rho|) * (grad rho) / |grad rho|
      !
-     !$omp target teams distribute parallel do reduction(+:etxcgc,vtxcgc)
+#if defined(_OPENACC)
      !$acc parallel loop reduction(+:etxcgc) reduction(+:vtxcgc)
+#elif defined(__OPENMP_GPU)
+     !$omp target teams distribute parallel do reduction(+:etxcgc,vtxcgc)
+#endif
      DO k = 1, dfftp_nnr
         !
         DO is = 1, nspin0
@@ -206,10 +213,11 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
         !
      ENDDO
      !
-#if defined(__OPENMP_GPU)
+#if defined(_OPENACC)
+     !$acc end data
+#elif defined(__OPENMP_GPU)
      !$omp end target data
 #endif
-     !$acc end data
      DEALLOCATE( v2c_ud )
      !
   ENDIF

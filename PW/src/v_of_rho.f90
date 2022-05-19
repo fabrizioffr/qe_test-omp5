@@ -478,31 +478,34 @@ SUBROUTINE v_xc( rho, rho_core, rhog_core, etxc, vtxc, v )
   !
   ALLOCATE( ex(dfftp%nnr), vx(dfftp%nnr,nspin) )
   ALLOCATE( ec(dfftp%nnr), vc(dfftp%nnr,nspin) )
+#if defined(_OPENACC)
   !$acc data create( ex, ec, vx, vc )
-#if defined(__OPENMP_GPU)
-     !$omp target data map(to:rho%of_r,rho_core) map(alloc:ex,ec,vx,vc) map(from:v)
-#endif
-  !
-  !$omp target teams distribute parallel do
   !$acc parallel loop
+#elif defined(__OPENMP_GPU)
+  !$omp target data map(to:rho%of_r,rho_core) map(alloc:ex,ec,vx,vc) map(from:v)
+  !$omp target teams distribute parallel do
+#endif
   DO ir = 1, dfftp_nnr
     rho%of_r(ir,1) = rho%of_r(ir,1) + rho_core(ir)
   ENDDO
   !
   IF ( nspin == 1 .OR. ( nspin == 4 .AND. .NOT. domag ) ) THEN
-    ! ... spin-unpolarized case
-    !
+     ! ... spin-unpolarized case
+     !
      CALL xc( dfftp_nnr, 1, 1, rho%of_r, ex, ec, vx, vc, gpu_args_=.TRUE. )
      !
-     !$omp target teams distribute parallel do reduction(+:etxc,vtxc,rhoneg1)
+#if defined(_OPENACC)
      !$acc parallel loop reduction(+:etxc) reduction(+:vtxc) reduction(-:rhoneg1) &
      !$acc&              present(rho)
+#elif defined(__OPENMP_GPU)
+     !$omp target teams distribute parallel do reduction(+:etxc,vtxc,rhoneg1)
+#endif
      DO ir = 1, dfftp_nnr
-        v(ir,1) = e2*( vx(ir,1) + vc(ir,1) )
-        etxc = etxc + e2*( ex(ir) + ec(ir) )*rho%of_r(ir,1)
-        rho%of_r(ir,1) = rho%of_r(ir,1) - rho_core(ir)
-        vtxc = vtxc + v(ir,1)*rho%of_r(ir,1)
-        IF (rho%of_r(ir,1) < 0.D0) rhoneg1 = rhoneg1-rho%of_r(ir,1)
+       v(ir,1) = e2*( vx(ir,1) + vc(ir,1) )
+       etxc = etxc + e2*( ex(ir) + ec(ir) )*rho%of_r(ir,1)
+       rho%of_r(ir,1) = rho%of_r(ir,1) - rho_core(ir)
+       vtxc = vtxc + v(ir,1)*rho%of_r(ir,1)
+       IF (rho%of_r(ir,1) < 0.D0) rhoneg1 = rhoneg1-rho%of_r(ir,1)
      ENDDO
      !
   ELSEIF ( nspin == 2 ) THEN
@@ -510,9 +513,12 @@ SUBROUTINE v_xc( rho, rho_core, rhog_core, etxc, vtxc, v )
      !
      CALL xc( dfftp_nnr, 2, 2, rho%of_r, ex, ec, vx, vc, gpu_args_=.TRUE. )
      !
-     !$omp target teams distribute parallel do reduction(+:etxc,vtxc,rhoneg1,rhoneg2)
+#if defined(_OPENACC)
      !$acc parallel loop reduction(+:etxc) reduction(+:vtxc) reduction(-:rhoneg1) &
      !$acc&              reduction(-:rhoneg2) present(rho)
+#elif defined(__OPENMP_GPU)
+     !$omp target teams distribute parallel do reduction(+:etxc,vtxc,rhoneg1,rhoneg2)
+#endif
      DO ir = 1, dfftp_nnr
         v(ir,1) = e2*( vx(ir,1) + vc(ir,1) )
         v(ir,2) = e2*( vx(ir,2) + vc(ir,2) )
@@ -527,49 +533,53 @@ SUBROUTINE v_xc( rho, rho_core, rhog_core, etxc, vtxc, v )
         IF (rhodw2 < 0.d0) rhoneg2 = rhoneg2 - rhodw2*0.5d0
      ENDDO
      !
-   ELSEIF ( nspin == 4 ) THEN
-      ! ... noncollinear case
-      !
-      CALL xc( dfftp_nnr, 4, 2, rho%of_r, ex, ec, vx, vc, gpu_args_=.TRUE. )
-      !
-      !$omp target teams distribute parallel do reduction(+:etxc,vtxc,rhoneg1,rhoneg2)
-      !$acc parallel loop reduction(+:etxc) reduction(+:vtxc) reduction(-:rhoneg1) &
-      !$acc&              reduction(+:rhoneg2) present(rho)
-      DO ir = 1, dfftp_nnr
-         arho = ABS( rho%of_r(ir,1) )
-         IF ( arho < vanishing_charge ) THEN
-           v(ir,1) = 0.d0 ;  v(ir,2) = 0.d0
-           v(ir,3) = 0.d0 ;  v(ir,4) = 0.d0
-           CYCLE
-         ENDIF
-         vs = 0.5D0*( vx(ir,1) + vc(ir,1) - vx(ir,2) - vc(ir,2) )
-         v(ir,1) = e2*( 0.5D0*( vx(ir,1) + vc(ir,1) + vx(ir,2) + vc(ir,2) ) )
-         !
-         amag = SQRT( rho%of_r(ir,2)**2 + rho%of_r(ir,3)**2 + rho%of_r(ir,4)**2 )
-         IF ( amag > vanishing_mag ) THEN
-            v(ir,2) = e2 * vs * rho%of_r(ir,2) / amag
-            v(ir,3) = e2 * vs * rho%of_r(ir,3) / amag
-            v(ir,4) = e2 * vs * rho%of_r(ir,4) / amag
-            vtxc24 = v(ir,2) * rho%of_r(ir,2) + v(ir,3) * rho%of_r(ir,3) + &
-                     v(ir,4) * rho%of_r(ir,4)
-         ELSE
-            v(ir,2) = 0.d0 ;  v(ir,3) = 0.d0 ;  v(ir,4) = 0.d0
-            vtxc24 = 0.d0
-         ENDIF
-         etxc = etxc + e2*( ex(ir) + ec(ir) ) * arho
-         !
-         rho%of_r(ir,1) = rho%of_r(ir,1) - rho_core(ir)
-         IF ( rho%of_r(ir,1) < 0.D0 )  rhoneg1 = rhoneg1 - rho%of_r(ir,1)
-         IF (   amag / arho  > 1.D0 )  rhoneg2 = rhoneg2 + 1.D0/omega
-         vtxc = vtxc + vtxc24 + v(ir,1) * rho%of_r(ir,1)
-      ENDDO
-      !
+  ELSEIF ( nspin == 4 ) THEN
+     ! ... noncollinear case
+     !
+     CALL xc( dfftp_nnr, 4, 2, rho%of_r, ex, ec, vx, vc, gpu_args_=.TRUE. )
+     !
+#if defined(_OPENACC)
+     !$acc parallel loop reduction(+:etxc) reduction(+:vtxc) reduction(-:rhoneg1) &
+     !$acc&              reduction(+:rhoneg2) present(rho)
+#elif defined(__OPENMP_GPU)
+     !$omp target teams distribute parallel do reduction(+:etxc,vtxc,rhoneg1,rhoneg2)
+#endif
+     DO ir = 1, dfftp_nnr
+        arho = ABS( rho%of_r(ir,1) )
+        IF ( arho < vanishing_charge ) THEN
+          v(ir,1) = 0.d0 ;  v(ir,2) = 0.d0
+          v(ir,3) = 0.d0 ;  v(ir,4) = 0.d0
+          CYCLE
+        ENDIF
+        vs = 0.5D0*( vx(ir,1) + vc(ir,1) - vx(ir,2) - vc(ir,2) )
+        v(ir,1) = e2*( 0.5D0*( vx(ir,1) + vc(ir,1) + vx(ir,2) + vc(ir,2) ) )
+        !
+        amag = SQRT( rho%of_r(ir,2)**2 + rho%of_r(ir,3)**2 + rho%of_r(ir,4)**2 )
+        IF ( amag > vanishing_mag ) THEN
+           v(ir,2) = e2 * vs * rho%of_r(ir,2) / amag
+           v(ir,3) = e2 * vs * rho%of_r(ir,3) / amag
+           v(ir,4) = e2 * vs * rho%of_r(ir,4) / amag
+           vtxc24 = v(ir,2) * rho%of_r(ir,2) + v(ir,3) * rho%of_r(ir,3) + &
+                    v(ir,4) * rho%of_r(ir,4)
+        ELSE
+           v(ir,2) = 0.d0 ;  v(ir,3) = 0.d0 ;  v(ir,4) = 0.d0
+           vtxc24 = 0.d0
+        ENDIF
+        etxc = etxc + e2*( ex(ir) + ec(ir) ) * arho
+        !
+        rho%of_r(ir,1) = rho%of_r(ir,1) - rho_core(ir)
+        IF ( rho%of_r(ir,1) < 0.D0 )  rhoneg1 = rhoneg1 - rho%of_r(ir,1)
+        IF (   amag / arho  > 1.D0 )  rhoneg2 = rhoneg2 + 1.D0/omega
+        vtxc = vtxc + vtxc24 + v(ir,1) * rho%of_r(ir,1)
+     ENDDO
+     !
   ENDIF
   !
-#if defined(__OPENMP_GPU)
-     !$omp end target data
-#endif
+#if defined(_OPENACC)
   !$acc end data
+#elif defined(__OPENMP_GPU)
+  !$omp end target data
+#endif
   DEALLOCATE( ex, vx )
   DEALLOCATE( ec, vc )
   !
