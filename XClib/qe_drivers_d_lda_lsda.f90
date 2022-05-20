@@ -115,11 +115,12 @@ SUBROUTINE dmxc_lda( length, rho_in, dmuxc )
         dmuxc(ir) = ( vx_s/(3.0_DP*rho) + dpz( rs, iflg )) * SIGN(1.0_DP,rho_in(ir)) * e2
         !
      ENDDO
-#if !defined(_OPENACC)
-!$omp end do
-!$omp end parallel
+#if defined(_OPENACC)
 #elif defined(__OPENMP_GPU)
 !$omp end target data
+#else
+!$omp end do
+!$omp end parallel
 #endif
      !
   ELSE
@@ -634,7 +635,9 @@ FUNCTION dpz( rs, iflg )
   !
   IMPLICIT NONE
   !
+#if defined(__OPENMP_GPU)
   !$omp declare target
+#endif
   !
   REAL(DP), INTENT(IN) :: rs
   INTEGER,  INTENT(IN) :: iflg
@@ -677,7 +680,9 @@ FUNCTION dpz_polarized( rs, iflg )
   !
   IMPLICIT NONE
   !
+#if defined(__OPENMP_GPU)
   !$omp declare target
+#endif
   !
   REAL(DP), INTENT(IN) :: rs
   INTEGER,  INTENT(IN) :: iflg

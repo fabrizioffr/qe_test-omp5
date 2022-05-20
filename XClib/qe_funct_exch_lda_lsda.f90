@@ -22,7 +22,9 @@ SUBROUTINE slater( rs, ex, vx )
   !
   IMPLICIT NONE
   !
-!$omp declare target
+#if defined(__OPENMP_GPU)
+  !$omp declare target
+#endif
   !
   REAL(DP), INTENT(IN) :: rs
   !! Wigner-Seitz radius
@@ -54,7 +56,9 @@ SUBROUTINE slater1( rs, ex, vx )
   !
   IMPLICIT NONE
   !
-!$omp declare target
+#if defined(__OPENMP_GPU)
+  !$omp declare target
+#endif
   !
   REAL(DP), INTENT(IN) :: rs
   !! Wigner-Seitz radius
@@ -86,7 +90,9 @@ SUBROUTINE slater_rxc( rs, ex, vx )
   !
   IMPLICIT NONE
   !
-!$omp declare target
+#if defined(__OPENMP_GPU)
+  !$omp declare target
+#endif
   !
   REAL(DP), INTENT(IN) :: rs
   !! Wigner-Seitz radius
@@ -142,7 +148,9 @@ SUBROUTINE slaterKZK( rs, ex, vx, vol )
   !
   IMPLICIT NONE
   !
-!$omp declare target
+#if defined(__OPENMP_GPU)
+  !$omp declare target
+#endif
   !
   REAL(DP), INTENT(IN) :: rs
   !! Wigner-Seitz radius
@@ -198,7 +206,9 @@ SUBROUTINE slater_spin( rho, zeta, ex, vx_up, vx_dw )
   !
   IMPLICIT NONE
   !
-!$omp declare target
+#if defined(__OPENMP_GPU)
+  !$omp declare target
+#endif
   !
   REAL(DP), INTENT(IN) :: rho
   !! total charge density
@@ -242,7 +252,9 @@ SUBROUTINE slater_rxc_spin( rho, z, ex, vx_up, vx_dw )
   !
   IMPLICIT NONE
   !
-!$omp declare target
+#if defined(__OPENMP_GPU)
+  !$omp declare target
+#endif
   !
   REAL(DP), INTENT(IN) :: rho
   !! total charge density
@@ -310,7 +322,9 @@ SUBROUTINE slater1_spin( rho, zeta, ex, vx_up, vx_dw )
   !
   IMPLICIT NONE
   !
-!$omp declare target
+#if defined(__OPENMP_GPU)
+  !$omp declare target
+#endif
   !
   REAL(DP), INTENT(IN) :: rho
   !! total charge density

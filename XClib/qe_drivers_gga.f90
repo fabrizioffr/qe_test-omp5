@@ -502,7 +502,7 @@ SUBROUTINE gcx_spin( length, rho_in, grho2_in, sx_tot, v1x_out, v2x_out )
 #if defined(_OPENACC)
 !$acc data present( rho_in, grho2_in, sx_tot, v1x_out, v2x_out )
 !$acc parallel loop
-#elif(__OPENMP_GPU)
+#elif defined(__OPENMP_GPU)
 !$omp target teams distribute parallel do
 #else
 !$omp parallel if(ntids==1) default(none) &
@@ -993,7 +993,7 @@ SUBROUTINE gcx_spin( length, rho_in, grho2_in, sx_tot, v1x_out, v2x_out )
   ENDDO
 #if defined(_OPENACC)
 !$acc end data
-#elif(__OPENMP_GPU)
+#elif defined(__OPENMP_GPU)
 #else
 !$omp end do
 !$omp end parallel

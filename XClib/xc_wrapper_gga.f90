@@ -90,7 +90,7 @@ SUBROUTINE xc_gcx( length, ns, rho, grho, ex, ec, v1x, v2x, v1c, v2c, v2c_ud, &
 #if defined(_OPENACC)
       !$acc data create( v2c_dummy )
 #elif defined(__OPENMP_GPU)
-      !$omp target data map(alloc:v2c_ud)
+      !$omp target data map(alloc:v2c_dummy)
 #endif
       CALL xc_gcx_( length, ns, rho, grho, ex, ec, v1x, v2x, v1c, v2c, v2c_dummy )
 #if defined(_OPENACC)
