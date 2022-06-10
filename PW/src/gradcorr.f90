@@ -144,7 +144,7 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
   DEALLOCATE( rhogaux )
   !
 #if defined(__OPENMP_GPU)
-  !$omp target data map(tofrom:rhoaux,v) map(to:grho) map(alloc:sx,sc,v1x,v2x,v1c,v2c) map(from:h)
+  !$omp target data map(tofrom:rhoaux,v) map(to:grho,rho_core) map(alloc:sx,sc,v1x,v2x,v1c,v2c) map(from:h)
 #endif
   !
   IF ( nspin0 == 1 ) THEN
@@ -156,7 +156,7 @@ SUBROUTINE gradcorr( rho, rhog, rho_core, rhog_core, etxc, vtxc, v )
      !
 #if defined(_OPENACC)
      !$acc parallel loop reduction(+:etxcgc) reduction(+:vtxcgc)
-#elif defined(_OPENMP_GPU)
+#elif defined(__OPENMP_GPU)
      !$omp target teams distribute parallel do reduction(+:etxcgc,vtxcgc)
 #endif
      DO k = 1, dfftp_nnr
